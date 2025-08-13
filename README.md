@@ -14,12 +14,6 @@ About the name - it's a play on words - go and compare.
 It also sounds funny in german as you can pronounce it like compare but with a saxon dialect.
 
 
-## Installation
-
-```
-go get github.com/chriss-de/gompare
-```
-
 ## Basic idea
 
 The comparison is always between LEFT and RIGHT. Think of it like two papers in front of you and you compare those two.
