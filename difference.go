@@ -75,13 +75,8 @@ func (d *Differences) GetDifferences(filterFunc ...DifferenceFilterFunc) iter.Se
 
 // HasDifferences returns true/false if Difference´s exists with applied filters
 func (d *Differences) HasDifferences(filterFunc ...DifferenceFilterFunc) bool {
-	for _, k := range *d {
-		for _, ff := range filterFunc {
-			// filterFunc are AND
-			if !ff(k) {
-				return false
-			}
-		}
+	for range d.GetDifferences(filterFunc...) {
+		return true
 	}
-	return true
+	return false
 }
