@@ -1,8 +1,9 @@
 package gompare
 
 import (
-	"errors"
+	"fmt"
 	"reflect"
+	"text/template"
 	"time"
 )
 
@@ -36,12 +37,27 @@ type config struct {
 	sliceOrdering             bool   // sliceOrdering indicates if the slices we compare are ordered and elements for comparison are at the same index
 	structMapKeys             bool   // structMapKeys allows complex struct keys to be encoded and represented in Differences path
 	embeddedStructsAsFields   bool   // embeddedStructsAsFields if true will add EmbeddedStructs by struct name to Differences
+	allowTypeMismatch         bool   // allowTypeMismatch reports values of different kinds as CHANGED instead of returning ErrTypeMismatch
 }
 
-// Comparer a configurable compare instance
+// Comparer a configurable compare instance. It is safe to use one Comparer from multiple goroutines.
 type Comparer struct {
 	config      config
 	differences Differences
+	// inProgress tracks the pointer/map/slice pairs that are currently being compared up the call stack.
+	// It is shared between a comparison and its clones and is used to detect cycles.
+	inProgress map[visitKey]struct{}
+	// templates caches parsed identifier templates for one comparison run, shared with clones
+	templates map[string]*template.Template
+}
+
+// visitKey identifies a pair of referencing values (pointer, map, slice) that is being compared
+type visitKey struct {
+	typ      reflect.Type
+	left     uintptr
+	right    uintptr
+	leftLen  int
+	rightLen int
 }
 
 // defaultConfig set the default config
@@ -70,10 +86,13 @@ func NewComparer(opts ...CompareOptsFunc) (*Comparer, error) {
 	return &d, nil
 }
 
-// clone clones Comparer to a new reference
+// clone creates a new Comparer with the same config and an empty result. It takes part in the
+// same comparison run as c and therefore shares the cycle detection state.
 func (c *Comparer) clone() *Comparer {
 	nc := &Comparer{
-		config: c.config,
+		config:     c.config,
+		inProgress: c.inProgress,
+		templates:  c.templates,
 	}
 	return nc
 }
@@ -112,28 +131,54 @@ func (c *Comparer) getCompareFunc(left, right reflect.Value) (Type, CompareFunc)
 
 // Compare returns Differences of all mutated values between left and right
 func (c *Comparer) Compare(left, right any) (Differences, error) {
-	// reset the state of the compare
-	c.differences = Differences{}
+	// every call gets its own state so one Comparer can be used concurrently
+	run := &Comparer{
+		config:      c.config,
+		differences: Differences{},
+		inProgress:  make(map[visitKey]struct{}),
+		templates:   make(map[string]*template.Template),
+	}
 
-	return c.differences, c.compare([]string{}, reflect.ValueOf(left), reflect.ValueOf(right))
+	err := run.compare([]string{}, reflect.ValueOf(left), reflect.ValueOf(right))
+
+	return run.differences, err
 }
 
 // compare is the internal compare functions. It compares left with right. This function gets also called
 // from the internal compare functions and from struct and slices compares
 func (c *Comparer) compare(path []string, left, right reflect.Value) error {
+	// nothing on both sides - nothing to compare
+	if left.Kind() == reflect.Invalid && right.Kind() == reflect.Invalid {
+		return nil
+	}
+
 	// check if types match or areKind
 	if !isValid(left, right) {
-		//if c.AllowTypeMismatch {
-		//	c.differences.Add(CHANGED, path, left.Interface(), right.Interface())
-		//	return nil
-		//}
-		return ErrTypeMismatch
+		if c.config.allowTypeMismatch {
+			c.differences.add(CHANGED, path, getAsAny(left), getAsAny(right))
+			return nil
+		}
+		return pathError(ErrTypeMismatch, path)
+	}
+
+	// cycle detection: if this pair of references is already being compared further up the
+	// call stack we treat it as equal, otherwise we would recurse forever
+	if key, ok := getVisitKey(left, right); ok {
+		if _, seen := c.inProgress[key]; seen {
+			return nil
+		}
+		c.inProgress[key] = struct{}{}
+		defer delete(c.inProgress, key)
 	}
 
 	cmpType, compareFunc := c.getCompareFunc(left, right)
 
 	if cmpType == UNSUPPORTED {
-		return errors.New("unsupported type: " + left.Kind().String())
+		kind := left.Kind()
+		if kind == reflect.Invalid {
+			kind = right.Kind()
+		}
+		return pathError(fmt.Errorf("%w: %s", ErrUnsupportedType, kind), path)
 	}
 
 	return compareFunc(path, left, right)

@@ -79,13 +79,18 @@ IF needed you can go fancy with go templating
 
 ```go
 type MyStruct struct {
-	Name    string  `cmp:"name,identifier={{ .name }}-i-am-the-key-{{ .attr1 }}"`
-	Attr1   int     `cmp:"attr1,identifier={{ .name }}-i-am-the-key-{{ .attr1 }}"`
+	Name    string  `cmp:"name,identifier:{{ .Name }}-i-am-the-key-{{ .Attr1 }}"`
+	Attr1   int     `cmp:"attr1,identifier:{{ .Name }}-i-am-the-key-{{ .Attr1 }}"`
 	Attr2   int     `cmp:"attr2"`
 }
 ```
 
-For this to work both identifier must have the same template string. 
+For this to work both identifier must have the same template string. The template data holds every identifier
+value under its Go field name (`{{ .Name }}`) and under its tag name (`{{ .name }}`). A template that does not parse
+or references an unknown key results in `ErrIdentifierTemplate`. The template may contain `:` but not `,`.
+
+An identifier must be unique within one slice - otherwise `Compare` returns `ErrDuplicateIdentifier`.
+Elements that have no identifier (e.g. a `nil` pointer in a `[]*MyStruct`) are matched by their index instead.
 
 ## Usage
 
@@ -152,11 +157,15 @@ func main() {
 }
 ```
 
+A `Comparer` holds no state between calls and can be used from multiple goroutines.
+
 Available options are:
 
 `WithTagName(name string)` uses this name as tag to look for on struct fields
 
-`WithSliceOrdering()` ensures that the ordering of items in a slice is taken into account
+`WithSliceOrdering()` ensures that the ordering of items in a slice is taken into account. Without it an element
+counts as present if an equal element exists anywhere on the other side. Elements left over on both sides are then
+paired by their index and compared against each other, which produces nested differences for a modified element.
 
 `WithCombinedIdentifierJoinString(joinSep rune)` when using a combined identifier this character is used to join all identifiers to one string for representation in path
 
@@ -166,6 +175,23 @@ Available options are:
 
 `WithEmbeddedStructsAsField()` if the struct has another struct embedded and this is set - the embedded struct will be listed as its own field with the struct fields as sub fields
 
+`WithAllowTypeMismatch()` by default `Compare` returns `ErrTypeMismatch` if two values are of different kind (e.g. an `int` that became a `string` inside a `map[string]any`). With this option the value is noted as `changed` instead.
+
+
+## Errors
+
+`Compare` returns an error if it cannot produce a reliable result. Errors are wrapped with the path where they
+happened, so match them with `errors.Is`:
+
+| Error                    | Reason                                                                                      |
+|--------------------------|---------------------------------------------------------------------------------------------|
+| `ErrTypeMismatch`        | left and right are of different kind (see `WithAllowTypeMismatch()`)                        |
+| `ErrUnsupportedType`     | a value of kind func, chan, complex or unsafe pointer was found                              |
+| `ErrDuplicateIdentifier` | an identifier appears more than once within one slice                                       |
+| `ErrIdentifierTemplate`  | an identifier template does not parse, references an unknown key or differs between fields  |
+| `ErrUnexportedField`     | unexported fields cannot be read on this Go version (the package checks this at startup)    |
+
+Unexported struct fields are compared like exported ones.
 
 ## Differences
 

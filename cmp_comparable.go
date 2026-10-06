@@ -29,29 +29,27 @@ func (c *Comparer) processComparableList(path []string, cmpList *ComparableList)
 	return nil
 }
 
-// isComparable checks if left and right contains identifiable objects and can be compared
-func (c *Comparer) isComparable(left, right reflect.Value) bool {
-	if left.Len() > 0 {
-		leftElem := left.Index(0)
-		leftVal := getFinalValue(leftElem)
+// isComparable checks if left and right contain identifiable objects and can be compared by identifier.
+// Only the first element of each side is inspected.
+func (c *Comparer) isComparable(path []string, left, right reflect.Value) (bool, error) {
+	for _, side := range []reflect.Value{left, right} {
+		if side.Len() == 0 {
+			continue
+		}
 
-		if leftVal.Kind() == reflect.Struct {
-			if getIdentifier(c.config.tagName, leftVal, string(c.config.combinedIdentifierJoinSep)) != nil {
-				return true
-			}
+		val := getFinalValue(side.Index(0))
+		if val.Kind() != reflect.Struct {
+			continue
+		}
+
+		id, err := c.getIdentifier(val)
+		if err != nil {
+			return false, pathError(err, path)
+		}
+		if id != nil {
+			return true, nil
 		}
 	}
 
-	if right.Len() > 0 {
-		rightElem := right.Index(0)
-		rightVal := getFinalValue(rightElem)
-
-		if rightVal.Kind() == reflect.Struct {
-			if getIdentifier(c.config.tagName, rightVal, string(c.config.combinedIdentifierJoinSep)) != nil {
-				return true
-			}
-		}
-	}
-
-	return false
+	return false, nil
 }

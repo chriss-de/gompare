@@ -1,6 +1,9 @@
 package gompare
 
-import "reflect"
+import (
+	"errors"
+	"reflect"
+)
 
 // sliceTracker holds a slice and a list of matches
 // you can check if slice contains an element
@@ -21,9 +24,9 @@ func newSliceTracker(slice reflect.Value, cmp *Comparer) *sliceTracker {
 	return st
 }
 
-// Has checks if the slice has a val inside it and compare's it
-func (st *sliceTracker) has(val reflect.Value) bool {
-
+// has checks if the slice has an element equal to val and marks it as matched.
+// A type mismatch between two elements just means they are not equal, any other error is returned.
+func (st *sliceTracker) has(val reflect.Value) (bool, error) {
 	for i := 0; i < st.slice.Len(); i++ {
 		// skip already matched elements
 		if st.matches[i] {
@@ -37,14 +40,17 @@ func (st *sliceTracker) has(val reflect.Value) bool {
 		// compare and check if the elements are identical
 		err := nc.compare([]string{}, x, val)
 		if err != nil {
-			continue
+			if errors.Is(err, ErrTypeMismatch) {
+				continue
+			}
+			return false, err
 		}
 
 		if len(nc.differences) == 0 {
 			st.matches[i] = true
-			return true
+			return true, nil
 		}
 	}
 
-	return false
+	return false, nil
 }

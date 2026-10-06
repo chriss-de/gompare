@@ -49,3 +49,12 @@ func WithEmbeddedStructsAsField() func(c *Comparer) error {
 		return nil
 	}
 }
+
+// WithAllowTypeMismatch reports two values of different kind (e.g. an int that became a string inside an
+// interface or map[string]any) as CHANGED instead of aborting with ErrTypeMismatch
+func WithAllowTypeMismatch() func(c *Comparer) error {
+	return func(c *Comparer) error {
+		c.config.allowTypeMismatch = true
+		return nil
+	}
+}

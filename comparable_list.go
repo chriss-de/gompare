@@ -23,21 +23,33 @@ func NewComparableList() *ComparableList {
 	}
 }
 
-// addLeft adds a value with key to the left side for comparison
-func (cl *ComparableList) addLeft(key any, val *reflect.Value) {
-	if (*cl).elems[key] == nil {
-		(*cl).elems[key] = &ComparableListEntry{}
-		(*cl).keys = append((*cl).keys, key)
+// indexKey is the key of a slice element that has no identifier
+type indexKey int
+
+// addLeft adds a value with key to the left side for comparison.
+// It returns false if the left side already holds a value for key.
+func (cl *ComparableList) addLeft(key any, val *reflect.Value) bool {
+	if cl.elems[key] == nil {
+		cl.elems[key] = &ComparableListEntry{}
+		cl.keys = append(cl.keys, key)
 	}
-	(*cl).elems[key].LEFT = val
+	if cl.elems[key].LEFT != nil {
+		return false
+	}
+	cl.elems[key].LEFT = val
+	return true
 }
 
-// addRight adds a value with key to the right side for comparison
-func (cl *ComparableList) addRight(key any, val *reflect.Value) {
-	if (*cl).elems[key] == nil {
-		(*cl).elems[key] = &ComparableListEntry{}
-		(*cl).keys = append((*cl).keys, key)
+// addRight adds a value with key to the right side for comparison.
+// It returns false if the right side already holds a value for key.
+func (cl *ComparableList) addRight(key any, val *reflect.Value) bool {
+	if cl.elems[key] == nil {
+		cl.elems[key] = &ComparableListEntry{}
+		cl.keys = append(cl.keys, key)
 	}
-
-	(*cl).elems[key].RIGHT = val
+	if cl.elems[key].RIGHT != nil {
+		return false
+	}
+	cl.elems[key].RIGHT = val
+	return true
 }

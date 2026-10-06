@@ -47,9 +47,9 @@ func (c *Comparer) cmpStruct(path []string, left, right reflect.Value) error {
 			fieldPath = copyAppend(fieldPath, tName)
 		}
 
-		// skip private fields
-		if !left.CanInterface() {
-			continue
+		// unexported fields are compared as well - getAsAny takes care of accessing them
+		if !leftField.CanInterface() && !unexportedAccessOK {
+			return pathError(ErrUnexportedField, fieldPath)
 		}
 
 		if err := c.compare(fieldPath, leftField, rightFieldName); err != nil {
@@ -58,6 +58,19 @@ func (c *Comparer) cmpStruct(path []string, left, right reflect.Value) error {
 	}
 
 	return nil
+}
+
+// missingCounterpart returns the value a field of a missing struct is compared against.
+// Containers (slice, array, map, pointer, interface) are compared against their zero value so their
+// elements get listed one by one as everywhere else. Every other field is compared against
+// reflect.Invalid so it is reported even if it holds its zero value.
+func missingCounterpart(field reflect.Value) reflect.Value {
+	switch field.Kind() {
+	case reflect.Slice, reflect.Array, reflect.Map, reflect.Ptr, reflect.Interface:
+		return reflect.Zero(field.Type())
+	default:
+		return reflect.Value{}
+	}
 }
 
 // cmpStructValuesForInvalid is used when one struct of cmpStruct was empty/invalid
@@ -77,8 +90,6 @@ func (c *Comparer) cmpStructValuesForInvalid(dt DiffType, path []string, val ref
 		return ErrTypeMismatch
 	}
 
-	valElem := reflect.New(val.Type()).Elem()
-
 	for idx := 0; idx < val.NumField(); idx++ {
 		field := val.Type().Field(idx)
 		tName := getTagName(c.config.tagName, field)
@@ -93,7 +104,7 @@ func (c *Comparer) cmpStructValuesForInvalid(dt DiffType, path []string, val ref
 		}
 
 		valField := val.Field(idx)
-		valFieldName := valElem.FieldByName(field.Name)
+		missing := missingCounterpart(valField)
 
 		fieldPath := path
 
@@ -102,13 +113,13 @@ func (c *Comparer) cmpStructValuesForInvalid(dt DiffType, path []string, val ref
 			fieldPath = copyAppend(fieldPath, tName)
 		}
 
-		// skip private fields
-		if !val.CanInterface() {
-			continue
+		// unexported fields are compared as well - getAsAny takes care of accessing them
+		if !valField.CanInterface() && !unexportedAccessOK {
+			return pathError(ErrUnexportedField, fieldPath)
 		}
 
-		err := nc.compare(fieldPath, valFieldName, valField)
-		if err != nil {
+		// Differences are always produced as "missing on the left" and patched to dt below
+		if err := nc.compare(fieldPath, missing, valField); err != nil {
 			return err
 		}
 	}
