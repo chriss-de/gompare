@@ -9,12 +9,7 @@ func (c *Comparer) cmpString(path []string, left, right reflect.Value) error {
 	}
 
 	if left.String() != right.String() {
-		if left.CanInterface() {
-			// if we cant access it as string - use any
-			c.differences.add(CHANGED, path, getAsAny(left), getAsAny(right))
-		} else {
-			c.differences.add(CHANGED, path, left.String(), right.String())
-		}
+		c.differences.add(CHANGED, path, getAsAny(left), getAsAny(right))
 	}
 
 	return nil

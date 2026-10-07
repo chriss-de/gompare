@@ -4,21 +4,21 @@ import (
 	"reflect"
 )
 
-// ComparableListEntry is an object holding two items that can be compared
-type ComparableListEntry struct {
+// comparableListEntry is an object holding two items that can be compared
+type comparableListEntry struct {
 	LEFT, RIGHT *reflect.Value
 }
 
-// ComparableList stores an indexed elems of ComparableListEntry items
-type ComparableList struct {
-	elems map[any]*ComparableListEntry
+// comparableList stores an indexed elems of comparableListEntry items
+type comparableList struct {
+	elems map[any]*comparableListEntry
 	keys  []any
 }
 
-// NewComparableList returns a new ComparableList
-func NewComparableList() *ComparableList {
-	return &ComparableList{
-		elems: make(map[any]*ComparableListEntry),
+// newComparableList returns a new comparableList
+func newComparableList() *comparableList {
+	return &comparableList{
+		elems: make(map[any]*comparableListEntry),
 		keys:  make([]any, 0),
 	}
 }
@@ -28,9 +28,9 @@ type indexKey int
 
 // addLeft adds a value with key to the left side for comparison.
 // It returns false if the left side already holds a value for key.
-func (cl *ComparableList) addLeft(key any, val *reflect.Value) bool {
+func (cl *comparableList) addLeft(key any, val *reflect.Value) bool {
 	if cl.elems[key] == nil {
-		cl.elems[key] = &ComparableListEntry{}
+		cl.elems[key] = &comparableListEntry{}
 		cl.keys = append(cl.keys, key)
 	}
 	if cl.elems[key].LEFT != nil {
@@ -42,9 +42,9 @@ func (cl *ComparableList) addLeft(key any, val *reflect.Value) bool {
 
 // addRight adds a value with key to the right side for comparison.
 // It returns false if the right side already holds a value for key.
-func (cl *ComparableList) addRight(key any, val *reflect.Value) bool {
+func (cl *comparableList) addRight(key any, val *reflect.Value) bool {
 	if cl.elems[key] == nil {
-		cl.elems[key] = &ComparableListEntry{}
+		cl.elems[key] = &comparableListEntry{}
 		cl.keys = append(cl.keys, key)
 	}
 	if cl.elems[key].RIGHT != nil {

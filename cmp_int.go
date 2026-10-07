@@ -9,11 +9,7 @@ func (c *Comparer) cmpInt(path []string, left, right reflect.Value) error {
 	}
 
 	if left.Int() != right.Int() {
-		if left.CanInterface() {
-			c.differences.add(CHANGED, path, getAsAny(left), getAsAny(right))
-		} else {
-			c.differences.add(CHANGED, path, left.Int(), right.Int())
-		}
+		c.differences.add(CHANGED, path, getAsAny(left), getAsAny(right))
 	}
 
 	return nil

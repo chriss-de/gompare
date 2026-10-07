@@ -8,8 +8,24 @@ import (
 // cmpSlice compares two slices , if the items of the slices are identifiable and comparable we go with cmpSliceComparable
 // otherwise we use  cmpSliceGeneric
 func (c *Comparer) cmpSlice(path []string, left, right reflect.Value) error {
-	if changed, err := c.cmpDefault(path, left, right); err != nil || changed {
-		return err
+	// a missing slice is compared as an empty one so every element gets listed
+	if left.Kind() == reflect.Invalid {
+		left = reflect.Zero(right.Type())
+	}
+	if right.Kind() == reflect.Invalid {
+		right = reflect.Zero(left.Type())
+	}
+
+	// with summarizeMissing an empty slice on one side is one entry holding the other side
+	if c.config.summarizeMissing {
+		if left.Len() == 0 && right.Len() > 0 {
+			c.differences.add(ADDED, path, nil, getAsAny(right))
+			return nil
+		}
+		if right.Len() == 0 && left.Len() > 0 {
+			c.differences.add(REMOVED, path, getAsAny(left), nil)
+			return nil
+		}
 	}
 
 	comparable, err := c.isComparable(path, left, right)
@@ -23,60 +39,73 @@ func (c *Comparer) cmpSlice(path []string, left, right reflect.Value) error {
 	return c.cmpSliceGeneric(path, left, right)
 }
 
-// cmpSliceGeneric uses sliceTracker to track every element in the slices and collects missing elements of left and right
+// cmpSliceGeneric collects the elements missing on either side and compares those
 func (c *Comparer) cmpSliceGeneric(path []string, left, right reflect.Value) error {
-	missing := NewComparableList()
+	missing := newComparableList()
 
-	rightSlice := newSliceTracker(right, c)
-	for i := 0; i < left.Len(); i++ {
-		leftElem := left.Index(i)
-
-		// if config.sliceOrdering is enabled and its not at the same index we add it to the missing objects
-		// OR if config.sliceOrdering is disabled and the sliceTracker for RIGHT does not have it
-		found, err := c.sliceHas(right, rightSlice, leftElem, i)
-		if err != nil {
-			return err
-		}
-		if !found {
-			missing.addLeft(i, &leftElem)
-		}
+	leftMissing, err := c.missingElems(left, right)
+	if err != nil {
+		return err
+	}
+	for _, i := range leftMissing {
+		elem := left.Index(i)
+		missing.addLeft(i, &elem)
 	}
 
-	leftSlice := newSliceTracker(left, c)
-	for i := 0; i < right.Len(); i++ {
-		rightElem := right.Index(i)
-
-		found, err := c.sliceHas(left, leftSlice, rightElem, i)
-		if err != nil {
-			return err
-		}
-		if !found {
-			missing.addRight(i, &rightElem)
-		}
+	rightMissing, err := c.missingElems(right, left)
+	if err != nil {
+		return err
+	}
+	for _, i := range rightMissing {
+		elem := right.Index(i)
+		missing.addRight(i, &elem)
 	}
 
-	// fallback to comparing based on order in slice if item is missing
 	if len(missing.keys) == 0 {
 		return nil
 	}
 
-	// process the ComparableList of missing objects of LEFT/RIGHT
+	// elements left over on both sides are paired by their index and compared against each other
 	return c.processComparableList(path, missing)
 }
 
-// sliceHas checks if elem is in slice: at index idx if slices are ordered, anywhere otherwise
-func (c *Comparer) sliceHas(slice reflect.Value, tracker *sliceTracker, elem reflect.Value, idx int) (bool, error) {
-	if c.config.sliceOrdering {
-		return hasAtSameIndex(slice, elem, idx), nil
+// missingElems returns the indexes of the elements of slice that have no counterpart in other:
+// at the same index if slices are ordered, anywhere otherwise
+func (c *Comparer) missingElems(slice, other reflect.Value) ([]int, error) {
+	var (
+		tracker *sliceTracker
+		missing []int
+	)
+	if !c.config.sliceOrdering {
+		tracker = newSliceTracker(other, c)
 	}
-	return tracker.has(elem)
+
+	for i := 0; i < slice.Len(); i++ {
+		elem := slice.Index(i)
+
+		var found bool
+		if c.config.sliceOrdering {
+			found = hasAtSameIndex(other, elem, i)
+		} else {
+			var err error
+			if found, err = tracker.has(elem); err != nil {
+				return nil, err
+			}
+		}
+
+		if !found {
+			missing = append(missing, i)
+		}
+	}
+
+	return missing, nil
 }
 
 // cmpSliceComparable compare's two slices if they have identifiable entries.
 // Elements without an identifier (e.g. nil pointers) are keyed by their index instead.
 // An identifier that appears more than once on one side results in ErrDuplicateIdentifier.
 func (c *Comparer) cmpSliceComparable(path []string, left, right reflect.Value) error {
-	cmpList := NewComparableList()
+	cmpList := newComparableList()
 
 	for i := 0; i < left.Len(); i++ {
 		leftElem := left.Index(i)
@@ -86,7 +115,7 @@ func (c *Comparer) cmpSliceComparable(path []string, left, right reflect.Value) 
 		}
 
 		if !cmpList.addLeft(leftID, &leftElem) {
-			return pathError(fmt.Errorf("%w: %q on left side", ErrDuplicateIdentifier, getID(leftID, false)), path)
+			return pathError(fmt.Errorf("%w: %v on left side", ErrDuplicateIdentifier, leftID), path)
 		}
 	}
 
@@ -98,7 +127,7 @@ func (c *Comparer) cmpSliceComparable(path []string, left, right reflect.Value) 
 		}
 
 		if !cmpList.addRight(rightID, &rightElem) {
-			return pathError(fmt.Errorf("%w: %q on right side", ErrDuplicateIdentifier, getID(rightID, false)), path)
+			return pathError(fmt.Errorf("%w: %v on right side", ErrDuplicateIdentifier, rightID), path)
 		}
 	}
 

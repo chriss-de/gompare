@@ -9,11 +9,7 @@ func (c *Comparer) cmpUint(path []string, left, right reflect.Value) error {
 	}
 
 	if left.Uint() != right.Uint() {
-		if left.CanInterface() {
-			c.differences.add(CHANGED, path, getAsAny(left), getAsAny(right))
-		} else {
-			c.differences.add(CHANGED, path, left.Uint(), right.Uint())
-		}
+		c.differences.add(CHANGED, path, getAsAny(left), getAsAny(right))
 	}
 
 	return nil

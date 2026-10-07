@@ -1,234 +1,255 @@
-# gompare [![PkgGoDev](https://pkg.go.dev/badge/github.com/chriss-de/gompare)](https://pkg.go.dev/github.com/chriss-de/gompare) [![Go Report Card](https://goreportcard.com/badge/github.com/chriss-de/gompare)](https://goreportcard.com/report/github.com/chriss-de/gompare)
+# gompare
 
-A go module for comparing structures and other go types of the same type.
+[![PkgGoDev](https://pkg.go.dev/badge/github.com/chriss-de/gompare/v2)](https://pkg.go.dev/github.com/chriss-de/gompare/v2)
+[![Go Report Card](https://goreportcard.com/badge/github.com/chriss-de/gompare)](https://goreportcard.com/report/github.com/chriss-de/gompare)
+[![CI](https://github.com/chriss-de/gompare/actions/workflows/ci.yml/badge.svg)](https://github.com/chriss-de/gompare/actions/workflows/ci.yml)
+[![License: MPL 2.0](https://img.shields.io/badge/License-MPL_2.0-brightgreen.svg)](LICENSE)
 
-It uses reflection and produces a list of Differences that show the difference between the 2 objects.
+Compare two Go values of the same type and get a list of what was **added**, **changed** or **removed** -
+with a path to every difference. Nested structs, slices, arrays, maps, pointers and interfaces are
+walked recursively. Slice elements can be matched by an identifier instead of their position.
 
-## History, heritage and name
-The original idea and project comes from project [diff](https://github.com/r3labs/diff). Since the project seems dead and/or unmaintained 
-I kind of forked and kind of rewrote the whole thing. I reused almost all tests since the basic idea is the same.
+```
+go get github.com/chriss-de/gompare/v2
+```
 
-I needed a library that can compare two structs with nested fields (including slices) in my other projects and therefore worked on gompare.
+Requires Go 1.24 or newer.
 
-About the name - it's a play on words - go and compare.
-It also sounds funny in german as you can pronounce it like compare but with a saxon dialect.
+## Quick start
 
+```go
+package main
 
-## Basic idea
+import (
+	"encoding/json"
+	"fmt"
 
-The comparison is always between LEFT and RIGHT. Think of it like two papers in front of you and you compare those two.
+	"github.com/chriss-de/gompare/v2"
+)
 
-## Difference Format
+type Item struct {
+	SKU string `cmp:"sku,identifier"`
+	Qty int    `cmp:"qty"`
+}
 
-When comparing two structures using `Compare`, it produces `Differences` - a list of `Difference` structs.
-Any detected difference will be noted:
+type Order struct {
+	ID    string            `cmp:"id"`
+	Items []Item            `cmp:"items"`
+	Tags  []string          `cmp:"tags"`
+	Meta  map[string]string `cmp:"meta"`
+	Note  string            `cmp:"-"`
+}
+
+func main() {
+	left := Order{
+		ID:    "1234",
+		Items: []Item{{SKU: "apple", Qty: 1}, {SKU: "pear", Qty: 2}},
+		Tags:  []string{"new"},
+		Meta:  map[string]string{"channel": "web"},
+		Note:  "ignored",
+	}
+	right := Order{
+		ID:    "1234",
+		Items: []Item{{SKU: "apple", Qty: 3}, {SKU: "plum", Qty: 1}},
+		Tags:  []string{"new", "paid"},
+		Meta:  map[string]string{"channel": "shop"},
+		Note:  "also ignored",
+	}
+
+	diffs, err := gompare.Compare(left, right)
+	if err != nil {
+		panic(err)
+	}
+
+	for _, d := range diffs {
+		out, _ := json.Marshal(d)
+		fmt.Println(string(out))
+	}
+}
+```
+
+Output:
+
+```json
+{"type":"changed","path":["items","apple","qty"],"left":1,"right":3}
+{"type":"removed","path":["items","pear","sku"],"left":"pear","right":null}
+{"type":"removed","path":["items","pear","qty"],"left":2,"right":null}
+{"type":"added","path":["items","plum","sku"],"left":null,"right":"plum"}
+{"type":"added","path":["items","plum","qty"],"left":null,"right":1}
+{"type":"added","path":["tags","1"],"left":null,"right":"paid"}
+{"type":"changed","path":["meta","channel"],"left":"web","right":"shop"}
+```
+
+The items are matched by their `sku` identifier, not by position. The `Note` field is excluded by its `-` tag.
+The same program is the `ExampleCompare` test in this repository, so the output above is verified on every test run.
+
+## How it works
+
+The comparison is always between **LEFT** and **RIGHT**. Think of two sheets of paper in front of you:
+whatever is only on the right sheet was *added*, whatever is only on the left sheet was *removed*,
+and whatever is on both sheets but different was *changed*.
+
+`Compare` returns `Differences`, a slice of:
 
 ```go
 type Difference struct {
-	Type  DiffType    // The type of change detected; one of: added , changed , removed
-	Path  []string    // The path of the detected change; will contain any field name or array index that was part of the traversal
-	Left  any         // The value on the left side
-	Right any         // The value on the right side 
+	Type  DiffType // ADDED, CHANGED or REMOVED (JSON: "added", "changed", "removed")
+	Path  []string // field names, map keys, slice indexes or identifiers along the way
+	Left  any      // the value on the left side, nil if added
+	Right any      // the value on the right side, nil if removed
 }
 ```
 
-Given the example below, we are comparing two slices where the third element (index=2) has been removed:
+`Left` and `Right` always hold the value in the type of its field. Unexported struct fields are
+compared like exported ones. `time.Time` values are compared by instant, not by location.
+
+### Reusing a Comparer
+
+Options can be passed to `Compare` directly or to `NewComparer` once. A `Comparer` holds no state
+between calls and can be used from multiple goroutines.
 
 ```go
-left := []int{1, 2, 3, 4}
-right := []int{1, 2, 4}
-
-differences, _ := gompare.Compare(left, right)
+cmp, err := gompare.NewComparer(gompare.WithSliceOrdering(), gompare.WithEmbeddedStructsAsField())
+if err != nil {
+	panic(err)
+}
+diffs, err := cmp.Compare(left, right)
 ```
 
-The result should be:
+## Tags
+
+Struct fields are configured with the `cmp` tag. The first value is the name used in the path
+(the Go field name if empty), everything after a comma is an option.
+
+| Tag                 | Effect                                                                    |
+|---------------------|---------------------------------------------------------------------------|
+| `cmp:"name"`        | use `name` in the path instead of the field name                           |
+| `cmp:"-"`           | exclude the field from the comparison                                      |
+| `cmp:",identifier"` | use the field to match elements of a slice or array (see below)            |
+
+`WithTagName("json")` lets you reuse another tag. Note that linters such as staticcheck (check SA5008)
+flag `identifier` as an unknown option on well known tags like `json` or `xml`. Keep the default `cmp`
+tag if you want to stay lint clean.
+
+### Identifiers
+
+By default slice elements are matched by equality, regardless of their position. If the elements are
+structs and one field is tagged as `identifier`, elements with the same identifier on both sides are
+compared with each other, and the identifier is used in the path instead of the index.
+
+Several fields can make up the identifier. They are joined with `|` by default
+(`WithCombinedIdentifierJoinString` changes the separator):
 
 ```go
-Difference{
-    Type:   gompare.REMOVED,
-    Path:   ["2"],
-    Left:   3,
-    Right:  nil,
+type Seat struct {
+	Row    string `cmp:"row,identifier"`
+	Number int    `cmp:"number,identifier"`
+	Owner  string `cmp:"owner"`
 }
+// path of a changed owner: ["A|12", "owner"]
 ```
 
-### Tags
-
-All tag values are prefixed with `cmp`. i.e. `cmp:"name"`.
-
-| Tag           | Usage                                                                                                                                                                                                                                                                |
-|---------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `-`           | Excludes a value from being compared                                                                                                                                                                                                                                 |
-| `,identifier` | If you need to compare arrays/slices by a matching identifier and not based on order, you can specify the `identifier` tag. If an identifiable element is found in both the left and right structure, they will be directly compared. i.e. `cmp:"name,identifier"`   |
-
-### Identifier
-
-gompare supports combined identifier. If your struct has two fields that make up a unique ID you can tag it like that.
+For full control the identifier can be a Go template. Every identifier field is available under its
+Go field name and under its tag name. All identifier fields of a struct must carry the same template:
 
 ```go
-type MyStruct struct {
-	Name    string  `cmp:"name,identifier"`
-	Attr1   int     `cmp:"attr1,identifier"`
-	Attr2   int     `cmp:"attr2"`
+type Seat struct {
+	Row    string `cmp:"row,identifier:{{ .row }}-{{ .number }}"`
+	Number int    `cmp:"number,identifier:{{ .row }}-{{ .number }}"`
+	Owner  string `cmp:"owner"`
 }
+// path of a changed owner: ["A-12", "owner"]
 ```
 
-When a difference is found the path will use both keys combined - separated by `|` (default)
+A template that does not parse, references an unknown key or differs between fields results in
+`ErrIdentifierTemplate`. The template may contain `:` but not `,`.
 
-IF needed you can go fancy with go templating
+Rules:
+
+- An identifier must be unique within one slice, otherwise `Compare` returns `ErrDuplicateIdentifier`.
+- Elements without an identifier (for example a `nil` pointer in a `[]*Seat`) are matched by their index.
+- The first struct element found on either side decides whether a slice is compared by identifier.
+
+## Options
+
+| Option                                        | Effect                                                                                                                                                                                                                 |
+|-----------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `WithTagName(name)`                           | read field names and options from this struct tag instead of `cmp`                                                                                                                                                     |
+| `WithSliceOrdering()`                         | compare slice elements by position. Without it an element counts as present if an equal element exists anywhere on the other side; elements left over on both sides are then paired by index and compared with each other |
+| `WithCombinedIdentifierJoinString(sep)`       | separator for combined identifiers in the path, default `\|`                                                                                                                                                           |
+| `WithEmbeddedStructsAsField()`                | list an embedded struct under its own name instead of merging its fields into the parent                                                                                                                               |
+| `WithSummarizeMissingStructs()`               | report a struct that exists on one side only as one entry holding the whole struct                                                                                                                                     |
+| `WithSummarizeMissing()`                      | like above, but for every container: struct, slice, array and map                                                                                                                                                      |
+| `WithStructMapKeys()`                         | encode map keys that are not strings, numbers or bools with gob and base64 for the path. Without it they are rendered with `fmt.Sprint`                                                                                  |
+| `WithAllowTypeMismatch()`                     | report two values of different kind (an `int` that became a `string` in a `map[string]any`) as `changed` instead of returning `ErrTypeMismatch`                                                                        |
+| `WithAllowDifferentStructs()`                 | compare structs of different types field by field (matched by Go field name) instead of returning `ErrTypeMismatch`                                                                                                    |
+
+## Missing values
+
+If a value exists on one side only, containers are listed by their content: a struct by its fields
+(including fields holding their zero value), a slice or array by its elements, a map by its entries.
+This also applies to the target of a pointer or interface that is `nil` on one side. A scalar behind a
+`nil` pointer or interface is one `changed` entry holding the dereferenced value. `nil` pointers, `nil`
+interfaces and empty containers inside a missing struct produce no entry.
+
+`WithSummarizeMissing()` and `WithSummarizeMissingStructs()` switch to one entry per missing container.
+
+## Filtering differences
+
+`GetDifferences` returns an iterator over the differences that pass all given filters.
+`HasDifferences` reports whether any difference passes them.
 
 ```go
-type MyStruct struct {
-	Name    string  `cmp:"name,identifier:{{ .Name }}-i-am-the-key-{{ .Attr1 }}"`
-	Attr1   int     `cmp:"attr1,identifier:{{ .Name }}-i-am-the-key-{{ .Attr1 }}"`
-	Attr2   int     `cmp:"attr2"`
+for d := range diffs.GetDifferences(gompare.WherePathAt("items", 0), gompare.WhereDiffType(gompare.CHANGED)) {
+	fmt.Printf("%s: %v -> %v\n", d.Path, d.Left, d.Right)
+}
+if diffs.HasDifferences(gompare.WherePath("tags")) {
+	// ...
 }
 ```
 
-For this to work both identifier must have the same template string. The template data holds every identifier
-value under its Go field name (`{{ .Name }}`) and under its tag name (`{{ .name }}`). A template that does not parse
-or references an unknown key results in `ErrIdentifierTemplate`. The template may contain `:` but not `,`.
-
-An identifier must be unique within one slice - otherwise `Compare` returns `ErrDuplicateIdentifier`.
-Elements that have no identifier (e.g. a `nil` pointer in a `[]*MyStruct`) are matched by their index instead.
-
-## Usage
-
-Comparing a basic struct can be accomplished using the Compare functions.
-
-```go
-import "github.com/chriss-de/gompare"
-
-type MyStruct struct {
-    ID    string `cmp:"id"`
-    Items []int  `cmp:"items"`
-}
-
-func main() {
-    left := Order{ ID: "1234", Items: []int{1, 2, 3, 4} }
-
-    right := Order{ ID: "1234", Items: []int{1, 2, 4} }
-
-    differences, err := gompare.Compare(left, right)
-}
-```
-
-In this example, the output generated will indicate that the third 
-element with a value of '3' was removed from items. When marshalling 
-to json, the output will look like:
-
-```json
-[
-    {
-        "type": "removed",
-        "path": ["items", "2"],
-        "left": 3,
-        "right": null
-    }
-]
-```
-
-## Configuration
-
-Options can be set on the differ at call time which effect how diff acts when 
-building the change log.
-
-```go
-import "github.com/chriss-de/gompare"
-
-func main() {
-    ...
-    diffs, err := gompare.Compare(
-		left, 
-		right,
-		gompare.WithSliceOrdering(),
-		gompare.WithEmbeddedStructsAsField(), 
-	)
-    ...
-    cmp, err := gompare.NewComparer(
-		gompare.WithSliceOrdering(),
-		gompare.WithEmbeddedStructsAsField(),
-	)
-    if err != nil {
-        panic(err)
-    }
-    diffs, err := cmp.Compare(left, right)
-	...
-}
-```
-
-A `Comparer` holds no state between calls and can be used from multiple goroutines.
-
-Available options are:
-
-`WithTagName(name string)` uses this name as tag to look for on struct fields
-
-`WithSliceOrdering()` ensures that the ordering of items in a slice is taken into account. Without it an element
-counts as present if an equal element exists anywhere on the other side. Elements left over on both sides are then
-paired by their index and compared against each other, which produces nested differences for a modified element.
-
-`WithCombinedIdentifierJoinString(joinSep rune)` when using a combined identifier this character is used to join all identifiers to one string for representation in path
-
-`WithSummarizeMissingStructs()` if a struct is added/removed on right this notes the difference as just one entry instead of every field on its own 
-
-`WithStructMapKeys()` enables the possibility to use complex values as struct keys. It gets encoded with gob/base64 to prevent problems when building path and comparing by key
-
-`WithEmbeddedStructsAsField()` if the struct has another struct embedded and this is set - the embedded struct will be listed as its own field with the struct fields as sub fields
-
-`WithAllowTypeMismatch()` by default `Compare` returns `ErrTypeMismatch` if two values are of different kind (e.g. an `int` that became a `string` inside a `map[string]any`). With this option the value is noted as `changed` instead.
-
+| Filter                       | Passes if                                                        |
+|------------------------------|------------------------------------------------------------------|
+| `WherePath(p)`               | any path segment equals `p`                                      |
+| `WherePathAt(p, idx)`        | the path segment at index `idx` equals `p`                       |
+| `WherePathDepth(n)`          | the path has exactly `n` segments                                |
+| `WherePathDepthGt(n)`        | the path has more than `n` segments                              |
+| `WherePathDepthLt(n)`        | the path has fewer than `n` segments                             |
+| `WhereDiffType(t)`           | the difference is of type `t`                                    |
+| `WhereOr(filters...)`        | any of the given filters passes (filters are AND-ed otherwise)   |
 
 ## Errors
 
-`Compare` returns an error if it cannot produce a reliable result. Errors are wrapped with the path where they
-happened, so match them with `errors.Is`:
+`Compare` returns an error if it cannot produce a reliable result. Errors are wrapped with the path
+where they happened, so match them with `errors.Is`:
 
-| Error                    | Reason                                                                                      |
-|--------------------------|---------------------------------------------------------------------------------------------|
-| `ErrTypeMismatch`        | left and right are of different kind (see `WithAllowTypeMismatch()`)                        |
-| `ErrUnsupportedType`     | a value of kind func, chan, complex or unsafe pointer was found                              |
-| `ErrDuplicateIdentifier` | an identifier appears more than once within one slice                                       |
-| `ErrIdentifierTemplate`  | an identifier template does not parse, references an unknown key or differs between fields  |
-| `ErrUnexportedField`     | unexported fields cannot be read on this Go version (the package checks this at startup)    |
+| Error                    | Reason                                                                                     |
+|--------------------------|--------------------------------------------------------------------------------------------|
+| `ErrTypeMismatch`        | left and right are of different kind or different struct type (see the `WithAllow*` options) |
+| `ErrUnsupportedType`     | a value of kind func, chan, complex or unsafe pointer was found                             |
+| `ErrDuplicateIdentifier` | an identifier appears more than once within one slice                                      |
+| `ErrIdentifierTemplate`  | an identifier template does not parse, references an unknown key or differs between fields |
+| `ErrInvalidOption`       | an option was given an invalid value, for example an empty tag name                        |
+| `ErrUnexportedField`     | unexported fields cannot be read on this Go version (the package checks this at startup)   |
 
-Unexported struct fields are compared like exported ones.
-
-## Differences
-
-When you have Differences you can use them in your code and process them as needed. To make this easier there are some 
-filter functions to only iterate over wanted Differences.
-
-```go
-    var diffs gompare.Differences
-    ...
-    for diff := range diffs.GetDifferences(cmp.WhereDiffType(dt), cmp.WherePathAt(attr, 0)) {
-		...
-    }
-```
-
-### Supported filters
-
-`WherePath(p string)` - checks if one path segments matches with `p`
-
-`WherePathAt(p string, idx int)` - checks if the path segment at index `idx` matches `p`
-
-`WherePathDepth(l int)` - checks if the path length is equal `l`
-
-`WherePathDepthGt(l int)` - checks if the path length is greater than `l`
-
-`WherePathDepthLt(l int)` - checks if the path length is less than `l`
-
-`WhereDiffType(dt DiffType)` - checks if the Difference type isequal to `dt`
-
-`WhereOr(filterFunc ...DifferenceFilterFunc)` - if you add multiple filter to `GetDifferences()` those filter are logical AND - this functions combine than logical OR. With this you can build almost any filter
-
-## Running Tests
+## Development
 
 ```
-go test -v
+go test -race -cover ./...
+go test -bench . -run xxx
 ```
 
-## Versioning
+The CI workflow runs gofmt, vet, the race tests and staticcheck on every push.
 
-For transparency into our release cycle and in striving to maintain backward
-compatibility, this project is maintained under [the Semantic Versioning guidelines](http://semver.org/).
+## History and name
+
+The original idea comes from [r3labs/diff](https://github.com/r3labs/diff). Since that project seemed
+unmaintained, gompare started as a fork and became a rewrite that kept most of the original tests.
+
+The name is a play on *go* and *compare*. It also sounds funny in German: pronounce *compare* with a
+Saxon accent.
+
+## Versioning and license
+
+This project follows [Semantic Versioning](https://semver.org/). Breaking changes are listed in
+[CHANGELOG.md](CHANGELOG.md). Licensed under the [Mozilla Public License 2.0](LICENSE).

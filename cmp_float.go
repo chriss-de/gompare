@@ -9,11 +9,7 @@ func (c *Comparer) cmpFloat(path []string, left, right reflect.Value) error {
 	}
 
 	if left.Float() != right.Float() {
-		if left.CanInterface() {
-			c.differences.add(CHANGED, path, getAsAny(left), getAsAny(right))
-		} else {
-			c.differences.add(CHANGED, path, left.Float(), right.Float())
-		}
+		c.differences.add(CHANGED, path, getAsAny(left), getAsAny(right))
 	}
 
 	return nil

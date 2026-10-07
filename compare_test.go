@@ -58,6 +58,12 @@ type RealWorldSubStructCombinedID struct {
 	SID  int64  `cmp:"-,identifier:{{.ID}}/{{.SID}},T"`
 }
 
+type RealWorldSubStructCombinedIDNoTemplate struct {
+	Name string `cmp:"name"`
+	ID   int64  `cmp:"-,identifier"`
+	SID  int64  `cmp:"-,identifier"`
+}
+
 type RealWorldStructCombinedID struct {
 	Name   string                          `cmp:"name,identifier"`
 	Value  int                             `cmp:"value"`
@@ -68,6 +74,12 @@ type RealWorldStruct struct {
 	Name   string                `cmp:"name,identifier"`
 	Value  int                   `cmp:"value"`
 	Addons []*RealWorldSubStruct `cmp:"addons"`
+}
+
+type CustomTagged struct {
+	Name  string `diff:"name,identifier"`
+	Value int    `diff:"value"`
+	Skip  int    `diff:"-"`
 }
 
 var testTimeA, _ = time.Parse(time.RFC3339, "2006-01-02T15:04:05Z")
@@ -83,12 +95,14 @@ func TestCompare(t *testing.T) {
 		LEFT, RIGHT any
 		Changes     Differences
 		Error       error
+		Options     []CompareOptsFunc
 	}{
 		{
 			"uint-equal",
 			uint(1),
 			uint(1),
 			Differences{},
+			nil,
 			nil,
 		},
 		{
@@ -99,12 +113,14 @@ func TestCompare(t *testing.T) {
 				Difference{Type: CHANGED, Path: []string{}, Left: uint(1), Right: uint(2)},
 			},
 			nil,
+			nil,
 		},
 		{
 			"int-equal",
 			int(1),
 			int(1),
 			Differences{},
+			nil,
 			nil,
 		},
 		{
@@ -115,12 +131,14 @@ func TestCompare(t *testing.T) {
 				Difference{Type: CHANGED, Path: []string{}, Left: int(1), Right: int(2)},
 			},
 			nil,
+			nil,
 		},
 		{
 			"float-equal",
 			float64(1.1),
 			float64(1.1),
 			Differences{},
+			nil,
 			nil,
 		},
 		{
@@ -131,12 +149,14 @@ func TestCompare(t *testing.T) {
 				Difference{Type: CHANGED, Path: []string{}, Left: float64(1.1), Right: float64(2.2)},
 			},
 			nil,
+			nil,
 		},
 		{
 			"string-equal",
 			"hello",
 			"hello",
 			Differences{},
+			nil,
 			nil,
 		},
 		{
@@ -147,12 +167,14 @@ func TestCompare(t *testing.T) {
 				Difference{Type: CHANGED, Path: []string{}, Left: "hello", Right: "world"},
 			},
 			nil,
+			nil,
 		},
 		{
 			"time-equal",
 			testTimeA,
 			testTimeA,
 			Differences{},
+			nil,
 			nil,
 		},
 		{
@@ -161,12 +183,14 @@ func TestCompare(t *testing.T) {
 				Difference{Type: CHANGED, Path: []string{}, Left: testTimeA, Right: testTimeB},
 			},
 			nil,
+			nil,
 		},
 		{
 			"SimpleStructNoTag-equal",
 			SimpleStructNoTag{Name: "test LEFT", Value: 123},
 			SimpleStructNoTag{Name: "test LEFT", Value: 123},
 			Differences{},
+			nil,
 			nil,
 		},
 		{
@@ -176,6 +200,7 @@ func TestCompare(t *testing.T) {
 			Differences{
 				Difference{Type: CHANGED, Path: []string{"Name"}, Left: "test LEFT", Right: "test RIGHT"},
 			},
+			nil,
 			nil,
 		},
 		{
@@ -187,22 +212,6 @@ func TestCompare(t *testing.T) {
 				Difference{Type: CHANGED, Path: []string{"Value"}, Left: 123, Right: 456},
 			},
 			nil,
-		},
-		{
-			"SimpleStructWithTag-equal",
-			SimpleStructWithTag{Name: "test LEFT", Value: 123},
-			SimpleStructWithTag{Name: "test LEFT", Value: 123},
-			Differences{},
-			nil,
-		},
-		{
-			"SimpleStructWithTag-not-equal",
-			SimpleStructWithTag{Name: "test LEFT", Value: 123},
-			SimpleStructWithTag{Name: "test RIGHT", Value: 456},
-			Differences{
-				Difference{Type: CHANGED, Path: []string{"name"}, Left: "test LEFT", Right: "test RIGHT"},
-				Difference{Type: CHANGED, Path: []string{"value"}, Left: 123, Right: 456},
-			},
 			nil,
 		},
 		{
@@ -211,24 +220,16 @@ func TestCompare(t *testing.T) {
 			SimpleStructWithTag{Name: "test LEFT", Value: 123},
 			Differences{},
 			nil,
+			nil,
 		},
 		{
-			"SimpleStructWithTag-not-equal",
+			"SimpleStructWithTag-not-equal-name-only",
 			SimpleStructWithTag{Name: "test LEFT", Value: 123},
 			SimpleStructWithTag{Name: "test RIGHT", Value: 123},
 			Differences{
 				Difference{Type: CHANGED, Path: []string{"name"}, Left: "test LEFT", Right: "test RIGHT"},
 			},
 			nil,
-		},
-		{
-			"SimpleStructWithTag-not-equal",
-			SimpleStructWithTag{Name: "test LEFT", Value: 123},
-			SimpleStructWithTag{Name: "test RIGHT", Value: 456},
-			Differences{
-				Difference{Type: CHANGED, Path: []string{"name"}, Left: "test LEFT", Right: "test RIGHT"},
-				Difference{Type: CHANGED, Path: []string{"value"}, Left: 123, Right: 456},
-			},
 			nil,
 		},
 		{
@@ -240,20 +241,33 @@ func TestCompare(t *testing.T) {
 				Difference{Type: CHANGED, Path: []string{"value"}, Left: 123, Right: 456},
 			},
 			nil,
-		},
-		{
-			"different-structs",
-			SimpleStructWithTag{Name: "test LEFT", Value: 123},
-			SimpleStructNoTag{Name: "test LEFT", Value: 123},
-			Differences{},
 			nil,
 		},
 		{
-			"different-structs",
+			"different-structs-tagged-vs-untagged",
+			SimpleStructWithTag{Name: "test LEFT", Value: 123},
+			SimpleStructNoTag{Name: "test LEFT", Value: 123},
+			Differences{},
+			ErrTypeMismatch,
+			nil,
+		},
+		{
+			"different-structs-untagged-vs-tagged",
 			SimpleStructNoTag{Name: "test LEFT", Value: 123},
 			SimpleStructWithTag{Name: "test LEFT", Value: 123},
 			Differences{},
+			ErrTypeMismatch,
 			nil,
+		},
+		{
+			"different-structs-allowed",
+			SimpleStructNoTag{Name: "test LEFT", Value: 123},
+			SimpleStructWithTag{Name: "test RIGHT", Value: 123},
+			Differences{
+				Difference{Type: CHANGED, Path: []string{"Name"}, Left: "test LEFT", Right: "test RIGHT"},
+			},
+			nil,
+			[]CompareOptsFunc{WithAllowDifferentStructs()},
 		},
 		{
 			"int-slice-insert",
@@ -262,6 +276,7 @@ func TestCompare(t *testing.T) {
 			Differences{
 				Difference{Type: ADDED, Path: []string{"3"}, Right: 4},
 			},
+			nil,
 			nil,
 		},
 		{
@@ -272,6 +287,7 @@ func TestCompare(t *testing.T) {
 				Difference{Type: ADDED, Path: []string{"3"}, Right: 4},
 			},
 			nil,
+			nil,
 		},
 		{
 			"int-slice-delete",
@@ -280,6 +296,7 @@ func TestCompare(t *testing.T) {
 			Differences{
 				Difference{Type: REMOVED, Path: []string{"1"}, Left: 2},
 			},
+			nil,
 			nil,
 		},
 		{
@@ -290,6 +307,7 @@ func TestCompare(t *testing.T) {
 				Difference{Type: REMOVED, Path: []string{"1"}, Left: 2},
 			},
 			nil,
+			nil,
 		},
 		{
 			"uint-slice-insert",
@@ -298,6 +316,7 @@ func TestCompare(t *testing.T) {
 			Differences{
 				Difference{Type: ADDED, Path: []string{"3"}, Right: uint(4)},
 			},
+			nil,
 			nil,
 		},
 		{
@@ -308,6 +327,7 @@ func TestCompare(t *testing.T) {
 				Difference{Type: ADDED, Path: []string{"3"}, Right: uint(4)},
 			},
 			nil,
+			nil,
 		},
 		{
 			"uint-slice-delete",
@@ -316,6 +336,7 @@ func TestCompare(t *testing.T) {
 			Differences{
 				Difference{Type: REMOVED, Path: []string{"1"}, Left: uint(2)},
 			},
+			nil,
 			nil,
 		},
 		{
@@ -326,6 +347,7 @@ func TestCompare(t *testing.T) {
 				Difference{Type: REMOVED, Path: []string{"1"}, Left: uint(2)},
 			},
 			nil,
+			nil,
 		},
 		{
 			"string-slice-insert",
@@ -334,6 +356,7 @@ func TestCompare(t *testing.T) {
 			Differences{
 				Difference{Type: ADDED, Path: []string{"3"}, Right: "4"},
 			},
+			nil,
 			nil,
 		},
 		{
@@ -344,6 +367,7 @@ func TestCompare(t *testing.T) {
 				Difference{Type: ADDED, Path: []string{"3"}, Right: "4"},
 			},
 			nil,
+			nil,
 		},
 		{
 			"string-slice-delete",
@@ -353,14 +377,16 @@ func TestCompare(t *testing.T) {
 				Difference{Type: REMOVED, Path: []string{"1"}, Left: "2"},
 			},
 			nil,
+			nil,
 		},
 		{
-			"string-slice-delete",
+			"string-array-delete",
 			[3]string{"1", "2", "3"},
 			[2]string{"1", "3"},
 			Differences{
 				Difference{Type: REMOVED, Path: []string{"1"}, Left: "2"},
 			},
+			nil,
 			nil,
 		},
 		{
@@ -372,6 +398,7 @@ func TestCompare(t *testing.T) {
 				Difference{Type: ADDED, Path: []string{"2"}, Right: "4"},
 			},
 			nil,
+			nil,
 		},
 		{
 			"string-array-insert-delete",
@@ -381,6 +408,7 @@ func TestCompare(t *testing.T) {
 				Difference{Type: REMOVED, Path: []string{"1"}, Left: "2"},
 				Difference{Type: ADDED, Path: []string{"2"}, Right: "4"},
 			},
+			nil,
 			nil,
 		},
 		{
@@ -392,6 +420,7 @@ func TestCompare(t *testing.T) {
 				Difference{Type: ADDED, Path: []string{"two", "value"}, Right: 2},
 			},
 			nil,
+			nil,
 		},
 		{
 			"isComparable-array-insert",
@@ -401,6 +430,7 @@ func TestCompare(t *testing.T) {
 				Difference{Type: ADDED, Path: []string{"two", "name"}, Right: "two"},
 				Difference{Type: ADDED, Path: []string{"two", "value"}, Right: 2},
 			},
+			nil,
 			nil,
 		},
 		{
@@ -412,6 +442,7 @@ func TestCompare(t *testing.T) {
 				Difference{Type: REMOVED, Path: []string{"two", "value"}, Left: 2},
 			},
 			nil,
+			nil,
 		},
 		{
 			"isComparable-array-delete",
@@ -421,6 +452,7 @@ func TestCompare(t *testing.T) {
 				Difference{Type: REMOVED, Path: []string{"two", "name"}, Left: "two"},
 				Difference{Type: REMOVED, Path: []string{"two", "value"}, Left: 2},
 			},
+			nil,
 			nil,
 		},
 		{
@@ -433,6 +465,7 @@ func TestCompare(t *testing.T) {
 				Difference{Type: REMOVED, Path: []string{"two", "baz"}, Left: "two"},
 			},
 			nil,
+			[]CompareOptsFunc{WithEmbeddedStructsAsField()},
 		},
 		{
 			"isComparable-array-delete-embedded-wo-opt",
@@ -444,6 +477,7 @@ func TestCompare(t *testing.T) {
 				Difference{Type: REMOVED, Path: []string{"two", "baz"}, Left: "two"},
 			},
 			nil,
+			nil,
 		},
 		{
 			"isComparable-slice-update",
@@ -452,6 +486,7 @@ func TestCompare(t *testing.T) {
 			Differences{
 				Difference{Type: CHANGED, Path: []string{"one", "value"}, Left: 1, Right: 50},
 			},
+			nil,
 			nil,
 		},
 		{
@@ -462,6 +497,7 @@ func TestCompare(t *testing.T) {
 				Difference{Type: CHANGED, Path: []string{"one", "value"}, Left: 1, Right: 50},
 			},
 			nil,
+			nil,
 		},
 		{
 			"map-slice-insert",
@@ -470,6 +506,7 @@ func TestCompare(t *testing.T) {
 			Differences{
 				Difference{Type: ADDED, Path: []string{"0", "tset"}, Right: "456"},
 			},
+			nil,
 			nil,
 		},
 		{
@@ -480,6 +517,7 @@ func TestCompare(t *testing.T) {
 				Difference{Type: ADDED, Path: []string{"0", "tset"}, Right: "456"},
 			},
 			nil,
+			nil,
 		},
 		{
 			"map-slice-update",
@@ -488,6 +526,7 @@ func TestCompare(t *testing.T) {
 			Differences{
 				Difference{Type: CHANGED, Path: []string{"0", "test"}, Left: "123", Right: "456"},
 			},
+			nil,
 			nil,
 		},
 		{
@@ -498,6 +537,7 @@ func TestCompare(t *testing.T) {
 				Difference{Type: CHANGED, Path: []string{"0", "test"}, Left: "123", Right: "456"},
 			},
 			nil,
+			nil,
 		},
 		{
 			"map-slice-delete",
@@ -506,6 +546,7 @@ func TestCompare(t *testing.T) {
 			Differences{
 				Difference{Type: REMOVED, Path: []string{"0", "tset"}, Left: "456"},
 			},
+			nil,
 			nil,
 		},
 		{
@@ -516,6 +557,7 @@ func TestCompare(t *testing.T) {
 				Difference{Type: REMOVED, Path: []string{"0", "tset"}, Left: "456"},
 			},
 			nil,
+			nil,
 		},
 		{
 			"map-interface-slice-update",
@@ -524,6 +566,7 @@ func TestCompare(t *testing.T) {
 			Differences{
 				Difference{Type: CHANGED, Path: []string{"0", "test"}, Left: nil, Right: "456"},
 			},
+			nil,
 			nil,
 		},
 		{
@@ -534,6 +577,7 @@ func TestCompare(t *testing.T) {
 				Difference{Type: CHANGED, Path: []string{"0", "test"}, Left: nil, Right: "456"},
 			},
 			nil,
+			nil,
 		},
 		{
 			"map-nil",
@@ -542,6 +586,7 @@ func TestCompare(t *testing.T) {
 			Differences{
 				Difference{Type: REMOVED, Path: []string{"one"}, Left: "test", Right: nil},
 			},
+			nil,
 			nil,
 		},
 		{
@@ -552,6 +597,7 @@ func TestCompare(t *testing.T) {
 				Difference{Type: ADDED, Path: []string{"one"}, Left: nil, Right: "test"},
 			},
 			nil,
+			nil,
 		},
 		{
 			"nested-map-insert",
@@ -560,6 +606,7 @@ func TestCompare(t *testing.T) {
 			Differences{
 				Difference{Type: ADDED, Path: []string{"a", "tset"}, Right: "456"},
 			},
+			nil,
 			nil,
 		},
 		{
@@ -570,6 +617,7 @@ func TestCompare(t *testing.T) {
 				Difference{Type: ADDED, Path: []string{"a", "tset"}, Right: "456"},
 			},
 			nil,
+			nil,
 		},
 		{
 			"nested-map-update",
@@ -578,6 +626,7 @@ func TestCompare(t *testing.T) {
 			Differences{
 				Difference{Type: CHANGED, Path: []string{"a", "test"}, Left: "123", Right: "456"},
 			},
+			nil,
 			nil,
 		},
 		{
@@ -588,6 +637,7 @@ func TestCompare(t *testing.T) {
 				Difference{Type: REMOVED, Path: []string{"a", "test"}, Left: "123", Right: nil},
 			},
 			nil,
+			nil,
 		},
 		{
 			"nested-slice-insert",
@@ -596,6 +646,7 @@ func TestCompare(t *testing.T) {
 			Differences{
 				Difference{Type: ADDED, Path: []string{"a", "3"}, Right: 4},
 			},
+			nil,
 			nil,
 		},
 		{
@@ -606,6 +657,7 @@ func TestCompare(t *testing.T) {
 				Difference{Type: ADDED, Path: []string{"a", "3"}, Right: 4},
 			},
 			nil,
+			nil,
 		},
 		{
 			"nested-slice-update",
@@ -614,6 +666,7 @@ func TestCompare(t *testing.T) {
 			Differences{
 				Difference{Type: CHANGED, Path: []string{"a", "1"}, Left: 2, Right: 4},
 			},
+			nil,
 			nil,
 		},
 		{
@@ -624,6 +677,7 @@ func TestCompare(t *testing.T) {
 				Difference{Type: CHANGED, Path: []string{"a", "1"}, Left: 2, Right: 4},
 			},
 			nil,
+			nil,
 		},
 		{
 			"nested-slice-delete",
@@ -633,6 +687,7 @@ func TestCompare(t *testing.T) {
 				Difference{Type: REMOVED, Path: []string{"a", "1"}, Left: 2, Right: nil},
 			},
 			nil,
+			nil,
 		},
 		{
 			"nested-array-delete",
@@ -641,6 +696,7 @@ func TestCompare(t *testing.T) {
 			Differences{
 				Difference{Type: REMOVED, Path: []string{"a", "1"}, Left: 2, Right: nil},
 			},
+			nil,
 			nil,
 		},
 
@@ -652,6 +708,7 @@ func TestCompare(t *testing.T) {
 				Difference{Type: CHANGED, Path: []string{"name"}, Left: "one", Right: "two"},
 			},
 			nil,
+			nil,
 		},
 		{
 			"struct-int-update",
@@ -660,6 +717,7 @@ func TestCompare(t *testing.T) {
 			Differences{
 				Difference{Type: CHANGED, Path: []string{"value"}, Left: 1, Right: 50},
 			},
+			nil,
 			nil,
 		},
 		{
@@ -670,6 +728,7 @@ func TestCompare(t *testing.T) {
 				Difference{Type: CHANGED, Path: []string{"bool"}, Left: true, Right: false},
 			},
 			nil,
+			nil,
 		},
 		{
 			"struct-time-update",
@@ -678,6 +737,7 @@ func TestCompare(t *testing.T) {
 			Differences{
 				Difference{Type: CHANGED, Path: []string{"time"}, Left: time.Time{}, Right: testTimeA},
 			},
+			nil,
 			nil,
 		},
 		{
@@ -688,6 +748,7 @@ func TestCompare(t *testing.T) {
 				Difference{Type: CHANGED, Path: []string{"map", "test"}, Left: "123", Right: "456"},
 			},
 			nil,
+			nil,
 		},
 		{
 			"struct-string-pointer-update",
@@ -697,14 +758,16 @@ func TestCompare(t *testing.T) {
 				Difference{Type: CHANGED, Path: []string{"pointer"}, Left: "test", Right: "test2"},
 			},
 			nil,
+			nil,
 		},
 		{
 			"struct-nil-string-pointer-update",
 			ComplexStruct{Pointer: nil},
 			ComplexStruct{Pointer: getStringPointer("test")},
 			Differences{
-				Difference{Type: CHANGED, Path: []string{"pointer"}, Left: nil, Right: getStringPointer("test")},
+				Difference{Type: CHANGED, Path: []string{"pointer"}, Left: nil, Right: "test"},
 			},
+			nil,
 			nil,
 		},
 		{
@@ -715,6 +778,7 @@ func TestCompare(t *testing.T) {
 				Difference{Type: ADDED, Path: []string{"values", "1"}, Left: nil, Right: "two"},
 			},
 			nil,
+			nil,
 		},
 		{
 			"struct-generic-slice-delete",
@@ -724,12 +788,14 @@ func TestCompare(t *testing.T) {
 				Difference{Type: REMOVED, Path: []string{"values", "1"}, Left: "two", Right: nil},
 			},
 			nil,
+			nil,
 		},
 		{
 			"omittable",
 			ComplexStruct{Ignored: false},
 			ComplexStruct{Ignored: true},
 			Differences{},
+			nil,
 			nil,
 		},
 		{
@@ -740,6 +806,7 @@ func TestCompare(t *testing.T) {
 				Difference{Type: ADDED, Path: []string{"1"}, Left: nil, Right: 1},
 			},
 			nil,
+			nil,
 		},
 		{
 			"mixed-slice-map",
@@ -748,8 +815,10 @@ func TestCompare(t *testing.T) {
 			Differences{
 				Difference{Type: CHANGED, Path: []string{"0", "type", "1"}, Left: "string", Right: "int"},
 				Difference{Type: ADDED, Path: []string{"1", "name"}, Left: nil, Right: "name2"},
-				Difference{Type: ADDED, Path: []string{"1", "type"}, Left: nil, Right: []string{"null", "string"}},
+				Difference{Type: ADDED, Path: []string{"1", "type", "0"}, Left: nil, Right: "null"},
+				Difference{Type: ADDED, Path: []string{"1", "type", "1"}, Left: nil, Right: "string"},
 			},
+			nil,
 			nil,
 		},
 		{
@@ -757,8 +826,9 @@ func TestCompare(t *testing.T) {
 			ComplexStruct{private: 1},
 			ComplexStruct{private: 4},
 			Differences{
-				Difference{Type: CHANGED, Path: []string{"private"}, Left: int64(1), Right: int64(4)},
+				Difference{Type: CHANGED, Path: []string{"private"}, Left: 1, Right: 4},
 			},
+			nil,
 			nil,
 		},
 		{
@@ -771,6 +841,7 @@ func TestCompare(t *testing.T) {
 				Difference{Type: CHANGED, Path: []string{"baz"}, Left: true, Right: false},
 			},
 			nil,
+			nil,
 		},
 		{
 			"embedded-struct-field-as-extra-field",
@@ -782,6 +853,7 @@ func TestCompare(t *testing.T) {
 				Difference{Type: CHANGED, Path: []string{"baz"}, Left: true, Right: false},
 			},
 			nil,
+			[]CompareOptsFunc{WithEmbeddedStructsAsField()},
 		},
 		{
 			"real-world-struct",
@@ -792,6 +864,7 @@ func TestCompare(t *testing.T) {
 				Difference{Type: REMOVED, Path: []string{"addons", "20", "name"}, Left: "Sub2"},
 				Difference{Type: ADDED, Path: []string{"addons", "30", "name"}, Right: "Sub3"},
 			},
+			nil,
 			nil,
 		},
 		{
@@ -805,6 +878,7 @@ func TestCompare(t *testing.T) {
 				Difference{Type: ADDED, Path: []string{"addons", "30", "name"}, Right: "Sub3"},
 			},
 			nil,
+			nil,
 		},
 		{
 			"real-world-struct-from-nil-combined-identifier",
@@ -817,52 +891,77 @@ func TestCompare(t *testing.T) {
 				Difference{Type: ADDED, Path: []string{"addons", "30/33", "name"}, Right: "Sub3"},
 			},
 			nil,
+			nil,
+		},
+		{
+			"custom-tags",
+			[]CustomTagged{{Name: "a", Value: 1, Skip: 1}},
+			[]CustomTagged{{Name: "a", Value: 2, Skip: 2}},
+			Differences{
+				Difference{Type: CHANGED, Path: []string{"a", "value"}, Left: 1, Right: 2},
+			},
+			nil,
+			[]CompareOptsFunc{WithTagName("diff")},
+		},
+		{
+			"slice-ordering",
+			[]string{"a", "b"},
+			[]string{"b", "a"},
+			Differences{
+				Difference{Type: CHANGED, Path: []string{"0"}, Left: "a", Right: "b"},
+				Difference{Type: CHANGED, Path: []string{"1"}, Left: "b", Right: "a"},
+			},
+			nil,
+			[]CompareOptsFunc{WithSliceOrdering()},
+		},
+		{
+			"summarize-missing-structs",
+			nil,
+			SimpleStructNoTag{Name: "a", Value: 1},
+			Differences{
+				Difference{Type: ADDED, Path: []string{}, Right: SimpleStructNoTag{Name: "a", Value: 1}},
+			},
+			nil,
+			[]CompareOptsFunc{WithSummarizeMissingStructs()},
+		},
+		{
+			"combined-identifier-join-string",
+			[]RealWorldSubStructCombinedIDNoTemplate{{ID: 1, SID: 2, Name: "a"}},
+			[]RealWorldSubStructCombinedIDNoTemplate{{ID: 1, SID: 2, Name: "b"}},
+			Differences{
+				Difference{Type: CHANGED, Path: []string{"1#2", "name"}, Left: "a", Right: "b"},
+			},
+			nil,
+			[]CompareOptsFunc{WithCombinedIdentifierJoinString('#')},
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.Name, func(t *testing.T) {
-			var options []CompareOptsFunc
-			switch tc.Name {
-			case "embedded-struct-field-as-extra-field":
-				options = append(options, WithEmbeddedStructsAsField())
-			case "isComparable-array-delete-embedded":
-				options = append(options, WithEmbeddedStructsAsField())
-
-			case "custom-tags":
-				options = append(options, WithTagName("json"))
-			}
-			cl, err := Compare(tc.LEFT, tc.RIGHT, options...)
+			cl, err := Compare(tc.LEFT, tc.RIGHT, tc.Options...)
 
 			if !errors.Is(err, tc.Error) {
 				t.Errorf("unexpected error - got: %v, wanted: %v", err, tc.Error)
 			}
-			if len(tc.Changes) != len(cl) {
-				t.Errorf("unexpected number of differences - got: %d, wanted: %d", len(tc.Changes), len(cl))
+			if len(cl) != len(tc.Changes) {
+				t.Fatalf("unexpected number of differences - got: %d, wanted: %d\n got:  %+v\n want: %+v", len(cl), len(tc.Changes), cl, tc.Changes)
 			}
 
 			for i, c := range cl {
-				if tc.Changes[i].Type != c.Type {
-					t.Errorf("unexpected type - wanted: %s, got: %s", tc.Changes[i].Type, c.Type)
+				want := tc.Changes[i]
+				if want.Type != c.Type {
+					t.Errorf("unexpected type - got: %s, wanted: %s", c.Type, want.Type)
 				}
-				if len(tc.Changes[i].Path) != len(c.Path) || strings.Join(tc.Changes[i].Path, "/") != strings.Join(c.Path, "/") {
-					t.Errorf("unexpected path - wanted: %v, got: %v", tc.Changes[i].Path, c.Path)
+				if strings.Join(want.Path, "/") != strings.Join(c.Path, "/") {
+					t.Errorf("unexpected path - got: %v, wanted: %v", c.Path, want.Path)
 				}
-				if !reflect.DeepEqual(tc.Changes[i].Left, c.Left) {
-					t.Errorf("unexpected LEFT - wanted: %s, got: %s", tc.Changes[i].Left, c.Left)
+				if !reflect.DeepEqual(want.Left, c.Left) {
+					t.Errorf("unexpected LEFT - got: %v, wanted: %v", c.Left, want.Left)
 				}
-				if !reflect.DeepEqual(tc.Changes[i].Right, c.Right) {
-					t.Errorf("unexpected RIGHT - wanted: %s, got: %s", tc.Changes[i].Right, c.Right)
+				if !reflect.DeepEqual(want.Right, c.Right) {
+					t.Errorf("unexpected RIGHT - got: %v, wanted: %v", c.Right, want.Right)
 				}
 			}
 		})
-	}
-}
-
-func Equal[V comparable](t *testing.T, got, expected V) {
-	t.Helper()
-
-	if expected != got {
-		t.Errorf(`assert.Equal(t,got:%v,expected:%v)`, got, expected)
 	}
 }

@@ -1,8 +1,12 @@
 package gompare
 
 import (
+	"bytes"
+	"encoding/base64"
+	"encoding/gob"
 	"errors"
 	"fmt"
+	"math"
 	"reflect"
 	"sort"
 	"strings"
@@ -589,8 +593,15 @@ func TestSliceTrackerPropagatesErrors(t *testing.T) {
 // The package verifies that at startup; if it ever stops working Compare returns an error
 // instead of reading garbage.
 func TestUnexportedAccessGuard(t *testing.T) {
-	if !checkUnexportedAccess() {
+	if !checkUnexportedAccess(forceExport) {
 		t.Fatal("unexported field access self test failed on this Go version")
+	}
+	// a probe that does nothing makes Interface() panic, a probe returning the wrong value fails the check
+	if checkUnexportedAccess(func(v reflect.Value) reflect.Value { return v }) {
+		t.Error("self test should fail when the field stays unexported")
+	}
+	if checkUnexportedAccess(func(v reflect.Value) reflect.Value { return reflect.ValueOf(7) }) {
+		t.Error("self test should fail on a wrong value")
 	}
 
 	type hidden struct{ a int }
@@ -607,10 +618,297 @@ func TestUnexportedAccessGuard(t *testing.T) {
 	if !errors.Is(err, ErrUnexportedField) || !strings.Contains(err.Error(), `"a"`) {
 		t.Errorf("expected ErrUnexportedField naming the path, got %v", err)
 	}
+	_, err = Compare(nil, hidden{1})
+	if !errors.Is(err, ErrUnexportedField) {
+		t.Errorf("expected ErrUnexportedField for a missing struct, got %v", err)
+	}
+	type hiddenID struct {
+		id int `cmp:"id,identifier"`
+	}
+	_, err = Compare([]hiddenID{{1}}, []hiddenID{{2}})
+	if !errors.Is(err, ErrUnexportedField) {
+		t.Errorf("expected ErrUnexportedField for an unexported identifier, got %v", err)
+	}
+	if got := getAsAny(reflect.ValueOf(hidden{1}).Field(0)); got != nil {
+		t.Errorf("getAsAny should return nil without unexported access, got %v", got)
+	}
 	// exported fields keep working
 	diffs, err = Compare(struct{ A int }{1}, struct{ A int }{2})
 	if err != nil {
 		t.Fatal(err)
 	}
 	assertDiffs(t, diffs, Differences{{Type: CHANGED, Path: []string{"A"}, Left: 1, Right: 2}})
+}
+
+// Point 6: isComparable looked only at element zero, so a leading nil pointer disabled identifier matching
+func TestIsComparableSkipsLeadingNil(t *testing.T) {
+	type ided struct {
+		ID    string `cmp:"id,identifier"`
+		Count int    `cmp:"count"`
+	}
+	diffs, err := Compare([]*ided{nil, {"a", 1}}, []*ided{nil, {"a", 2}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertDiffs(t, diffs, Differences{{Type: CHANGED, Path: []string{"a", "count"}, Left: 1, Right: 2}})
+
+	// mixed []any: the first struct decides, non structs are keyed by index
+	diffs, err = Compare([]any{5, ided{"a", 1}}, []any{6, ided{"a", 2}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertDiffs(t, diffs, Differences{
+		{Type: CHANGED, Path: []string{"0"}, Left: 5, Right: 6},
+		{Type: CHANGED, Path: []string{"a", "count"}, Left: 1, Right: 2},
+	})
+}
+
+// Point 5: the indexed fast path for basic kinds must behave exactly like the full compare
+func TestUnorderedBasicSliceFastPath(t *testing.T) {
+	type color string
+	nan := math.NaN()
+
+	cases := []struct {
+		name        string
+		left, right any
+		want        Differences
+	}{
+		{"duplicates", []int{1, 1, 2}, []int{1, 2, 2}, Differences{
+			{Type: REMOVED, Path: []string{"1"}, Left: 1},
+			{Type: ADDED, Path: []string{"2"}, Right: 2},
+		}},
+		{"leftovers-at-same-index-are-paired", []int{1, 2, 3}, []int{1, 2, 4}, Differences{
+			{Type: CHANGED, Path: []string{"2"}, Left: 3, Right: 4},
+		}},
+		{"named-type", []color{"r", "g"}, []color{"g", "b"}, Differences{
+			{Type: REMOVED, Path: []string{"0"}, Left: color("r")},
+			{Type: ADDED, Path: []string{"1"}, Right: color("b")},
+		}},
+		{"reordered-equal", []string{"a", "b", "c"}, []string{"c", "a", "b"}, Differences{}},
+		{"nan-never-equal", []float64{nan}, []float64{nan}, Differences{
+			{Type: CHANGED, Path: []string{"0"}, Left: nan, Right: nan},
+		}},
+		{"bool", []bool{true, false}, []bool{false}, Differences{
+			{Type: REMOVED, Path: []string{"0"}, Left: true},
+		}},
+		{"array", [3]uint8{1, 2, 3}, [3]uint8{3, 2, 9}, Differences{
+			{Type: REMOVED, Path: []string{"0"}, Left: uint8(1)},
+			{Type: ADDED, Path: []string{"2"}, Right: uint8(9)},
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			diffs, err := Compare(tc.left, tc.right)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.name == "nan-never-equal" {
+				if len(diffs) != 1 || diffs[0].Type != CHANGED || diffs[0].Path[0] != "0" {
+					t.Fatalf("got %+v", diffs)
+				}
+				return
+			}
+			assertDiffs(t, diffs, tc.want)
+		})
+	}
+
+	// unexported slice of basic kind
+	type hidden struct{ items []int }
+	diffs, err := Compare(hidden{[]int{1, 2}}, hidden{[]int{2, 3}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertDiffsLoose(t, diffs, Differences{
+		{Type: REMOVED, Path: []string{"items", "0"}, Left: 1},
+		{Type: ADDED, Path: []string{"items", "1"}, Right: 3},
+	})
+}
+
+// Point 1: values are reported in the type of their field, exported or not
+func TestValueTypesFollowField(t *testing.T) {
+	type hidden struct {
+		i int
+		u uint8
+		f float32
+		s string
+	}
+	diffs, err := Compare(hidden{1, 2, 3, "a"}, hidden{4, 5, 6, "b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertDiffs(t, diffs, Differences{
+		{Type: CHANGED, Path: []string{"i"}, Left: 1, Right: 4},
+		{Type: CHANGED, Path: []string{"u"}, Left: uint8(2), Right: uint8(5)},
+		{Type: CHANGED, Path: []string{"f"}, Left: float32(3), Right: float32(6)},
+		{Type: CHANGED, Path: []string{"s"}, Left: "a", Right: "b"},
+	})
+}
+
+// Point 2: a missing container is expanded into its elements/fields everywhere,
+// WithSummarizeMissing reports it as one entry
+func TestMissingContainersExpand(t *testing.T) {
+	type inner struct{ A int }
+	type holder struct {
+		P *inner
+		S []int
+		M map[string]int
+		I any
+	}
+	str := "x"
+
+	diffs, err := Compare(nil, []int{1, 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertDiffs(t, diffs, Differences{
+		{Type: ADDED, Path: []string{"0"}, Right: 1},
+		{Type: ADDED, Path: []string{"1"}, Right: 2},
+	})
+
+	diffs, err = Compare([]int{1}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertDiffs(t, diffs, Differences{{Type: REMOVED, Path: []string{"0"}, Left: 1}})
+
+	full := holder{P: &inner{1}, S: []int{7}, M: map[string]int{"k": 1}, I: inner{2}}
+	diffs, err = Compare(holder{}, full)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertDiffs(t, diffs, Differences{
+		{Type: ADDED, Path: []string{"P", "A"}, Right: 1},
+		{Type: ADDED, Path: []string{"S", "0"}, Right: 7},
+		{Type: ADDED, Path: []string{"M", "k"}, Right: 1},
+		{Type: ADDED, Path: []string{"I", "A"}, Right: 2},
+	})
+
+	diffs, err = Compare(full, holder{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertDiffs(t, diffs, Differences{
+		{Type: REMOVED, Path: []string{"P", "A"}, Left: 1},
+		{Type: REMOVED, Path: []string{"S", "0"}, Left: 7},
+		{Type: REMOVED, Path: []string{"M", "k"}, Left: 1},
+		{Type: REMOVED, Path: []string{"I", "A"}, Left: 2},
+	})
+
+	// a scalar behind a nil pointer or interface is one CHANGED entry with the dereferenced value
+	diffs, err = Compare(struct{ P *string }{}, struct{ P *string }{&str})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertDiffs(t, diffs, Differences{{Type: CHANGED, Path: []string{"P"}, Left: nil, Right: "x"}})
+
+	diffs, err = Compare(struct{ I any }{}, struct{ I any }{5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertDiffs(t, diffs, Differences{{Type: CHANGED, Path: []string{"I"}, Left: nil, Right: 5}})
+
+	// nil pointers, nil interfaces and empty containers inside a missing struct produce no entry
+	diffs, err = Compare(nil, holder{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertDiffs(t, diffs, Differences{})
+
+	// one entry per missing container with WithSummarizeMissing
+	diffs, err = Compare(nil, []int{1, 2}, WithSummarizeMissing())
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertDiffs(t, diffs, Differences{{Type: ADDED, Path: []string{}, Right: []int{1, 2}}})
+
+	diffs, err = Compare(holder{}, full, WithSummarizeMissing())
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertDiffs(t, diffs, Differences{
+		{Type: ADDED, Path: []string{"P"}, Right: inner{1}},
+		{Type: ADDED, Path: []string{"S"}, Right: []int{7}},
+		{Type: ADDED, Path: []string{"M"}, Right: map[string]int{"k": 1}},
+		{Type: ADDED, Path: []string{"I"}, Right: inner{2}},
+	})
+
+	diffs, err = Compare(full, nil, WithSummarizeMissing())
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertDiffs(t, diffs, Differences{{Type: REMOVED, Path: []string{}, Left: full}})
+}
+
+// Point 3: map keys are encoded the same way whether or not the other map exists
+func TestMapKeyEncoding(t *testing.T) {
+	type key struct{ A, B int }
+
+	var buf bytes.Buffer
+	if err := gob.NewEncoder(&buf).Encode(key{1, 2}); err != nil {
+		t.Fatal(err)
+	}
+	encoded := base64.RawStdEncoding.EncodeToString(buf.Bytes())
+
+	cases := []struct {
+		name        string
+		left, right any
+		opts        []CompareOptsFunc
+		wantPath    string
+	}{
+		{"struct-key-both", map[key]int{{1, 2}: 1}, map[key]int{{1, 2}: 2}, []CompareOptsFunc{WithStructMapKeys()}, encoded},
+		{"struct-key-missing", nil, map[key]int{{1, 2}: 2}, []CompareOptsFunc{WithStructMapKeys()}, encoded},
+		{"struct-key-both-no-opt", map[key]int{{1, 2}: 1}, map[key]int{{1, 2}: 2}, nil, "{1 2}"},
+		{"struct-key-missing-no-opt", nil, map[key]int{{1, 2}: 2}, nil, "{1 2}"},
+		{"string-key-both", map[string]int{"k": 1}, map[string]int{"k": 2}, []CompareOptsFunc{WithStructMapKeys()}, "k"},
+		{"string-key-missing", nil, map[string]int{"k": 2}, []CompareOptsFunc{WithStructMapKeys()}, "k"},
+		{"int64-key-both", map[int64]int{7: 1}, map[int64]int{7: 2}, []CompareOptsFunc{WithStructMapKeys()}, "7"},
+		{"int64-key-missing", nil, map[int64]int{7: 2}, []CompareOptsFunc{WithStructMapKeys()}, "7"},
+		{"float-key-both", map[float64]int{1.5: 1}, map[float64]int{1.5: 2}, []CompareOptsFunc{WithStructMapKeys()}, "1.5"},
+		{"bool-key-missing", nil, map[bool]int{true: 2}, []CompareOptsFunc{WithStructMapKeys()}, "true"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			diffs, err := Compare(tc.left, tc.right, tc.opts...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(diffs) != 1 || len(diffs[0].Path) != 1 || diffs[0].Path[0] != tc.wantPath {
+				t.Fatalf("got %+v, wanted one difference with path %q", diffs, tc.wantPath)
+			}
+		})
+	}
+}
+
+// Point 4: structs of different types are a type mismatch unless allowed by option
+func TestDifferentStructTypes(t *testing.T) {
+	type a struct{ X int }
+	type b struct{ X int }
+
+	_, err := Compare(a{1}, b{1})
+	if !errors.Is(err, ErrTypeMismatch) {
+		t.Fatalf("expected ErrTypeMismatch, got %v", err)
+	}
+
+	_, err = Compare(struct{ F any }{a{1}}, struct{ F any }{b{1}})
+	if !errors.Is(err, ErrTypeMismatch) || !strings.Contains(err.Error(), `"F"`) {
+		t.Fatalf("expected ErrTypeMismatch at path F, got %v", err)
+	}
+
+	diffs, err := Compare(a{1}, b{1}, WithAllowTypeMismatch())
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertDiffs(t, diffs, Differences{{Type: CHANGED, Path: []string{}, Left: a{1}, Right: b{1}}})
+
+	diffs, err = Compare(a{1}, b{1}, WithAllowDifferentStructs())
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertDiffs(t, diffs, Differences{})
+
+	diffs, err = Compare(a{1}, b{2}, WithAllowDifferentStructs())
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertDiffs(t, diffs, Differences{{Type: CHANGED, Path: []string{"X"}, Left: 1, Right: 2}})
 }

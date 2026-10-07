@@ -1,12 +1,6 @@
 package gompare
 
-import (
-	"bytes"
-	"encoding/base64"
-	"encoding/gob"
-	"fmt"
-	"reflect"
-)
+import "reflect"
 
 // cmpMap compare's two maps
 // If one is empty/invalid we add all keys as ADDED/REMOVED
@@ -19,7 +13,19 @@ func (c *Comparer) cmpMap(path []string, left, right reflect.Value) error {
 		return c.cmpMapValuesForInvalid(REMOVED, path, left)
 	}
 
-	cmpList := NewComparableList()
+	// with summarizeMissing an empty map on one side is one entry holding the other side
+	if c.config.summarizeMissing {
+		if left.Len() == 0 && right.Len() > 0 {
+			c.differences.add(ADDED, path, nil, getAsAny(right))
+			return nil
+		}
+		if right.Len() == 0 && left.Len() > 0 {
+			c.differences.add(REMOVED, path, getAsAny(left), nil)
+			return nil
+		}
+	}
+
+	cmpList := newComparableList()
 
 	for _, k := range sortedMapKeys(left) {
 		leftElem := left.MapIndex(k)
@@ -36,40 +42,17 @@ func (c *Comparer) cmpMap(path []string, left, right reflect.Value) error {
 
 // cmpMapValuesForInvalid is used by cmpMap for maps that are empty/invalid to note all Differences
 func (c *Comparer) cmpMapValuesForInvalid(dt DiffType, path []string, val reflect.Value) error {
-	if dt != ADDED && dt != REMOVED {
-		return ErrInvalidChangeType
-	}
-
-	if val.Kind() == reflect.Ptr {
-		val = reflect.Indirect(val)
-	}
-
-	if val.Kind() != reflect.Map {
-		return ErrTypeMismatch
-	}
-
 	// compare on a clone so only the Differences of this map get patched below
 	var nc *Comparer = c.clone()
 	missing := reflect.Value{}
 
 	for _, k := range sortedMapKeys(val) {
-		ae := val.MapIndex(k)
-
-		var err error
-
-		// if configured we encode the map key with gob/base64
-		// otherwise just print it as string
-		// strings won't work on complex keys that cannot be stringified
-		if c.config.structMapKeys {
-			var bWriter = new(bytes.Buffer)
-			if err = gob.NewEncoder(bWriter).Encode(getAsAny(k)); err == nil {
-				key := base64.RawStdEncoding.EncodeToString(bWriter.Bytes())
-				err = nc.compare(copyAppend(path, key), missing, ae)
-			}
-		} else {
-			err = nc.compare(copyAppend(path, fmt.Sprint(getAsAny(k))), missing, ae)
-		}
+		key, err := getID(getAsAny(k), c.config.structMapKeys)
 		if err != nil {
+			return pathError(err, path)
+		}
+
+		if err := nc.compare(copyAppend(path, key), missing, val.MapIndex(k)); err != nil {
 			return err
 		}
 	}

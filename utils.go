@@ -2,6 +2,7 @@ package gompare
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/gob"
 	"fmt"
 	"reflect"
@@ -25,10 +26,10 @@ var (
 
 // unexportedAccessOK is the result of the startup self test of getAsAny.
 // If it is false, Compare returns ErrUnexportedField when it meets an unexported field.
-var unexportedAccessOK = checkUnexportedAccess()
+var unexportedAccessOK = checkUnexportedAccess(forceExport)
 
-// checkUnexportedAccess verifies at startup that getAsAny can read an unexported field
-func checkUnexportedAccess() (ok bool) {
+// checkUnexportedAccess verifies at startup that export (forceExport) makes an unexported field readable
+func checkUnexportedAccess(export func(reflect.Value) reflect.Value) (ok bool) {
 	defer func() {
 		if recover() != nil {
 			ok = false
@@ -37,11 +38,8 @@ func checkUnexportedAccess() (ok bool) {
 
 	type probe struct{ v int }
 	field := reflect.ValueOf(probe{v: 42}).Field(0)
-	if field.CanInterface() {
-		return true
-	}
 
-	val, isInt := forceExport(field).Interface().(int)
+	val, isInt := export(field).Interface().(int)
 	return isInt && val == 42
 }
 
@@ -115,27 +113,56 @@ func areType(left, right reflect.Value, types ...reflect.Type) bool {
 	return leftMatch && rightMatch
 }
 
-// getVisitKey returns a key identifying the pair left/right if both are non-nil references
+// getVisitKey returns a key identifying the pair left/right if they are non-nil references
 // (pointer, map or slice) of the same type. Those are the only values that can form cycles.
+// If one side is missing (reflect.Invalid) the key holds the present reference only, so expanding
+// a missing cyclic structure terminates as well.
 func getVisitKey(left, right reflect.Value) (visitKey, bool) {
-	if left.Kind() != right.Kind() || left.Type() != right.Type() {
+	if left.Kind() == reflect.Invalid {
+		return oneSidedVisitKey(right, false)
+	}
+	if right.Kind() == reflect.Invalid {
+		return oneSidedVisitKey(left, true)
+	}
+
+	if left.Kind() != right.Kind() || left.Type() != right.Type() || !isReference(left) {
+		return visitKey{}, false
+	}
+	if left.IsNil() || right.IsNil() {
 		return visitKey{}, false
 	}
 
-	switch left.Kind() {
-	case reflect.Ptr, reflect.Map, reflect.Slice:
-		if left.IsNil() || right.IsNil() {
-			return visitKey{}, false
-		}
-		return visitKey{
-			typ:      left.Type(),
-			left:     left.Pointer(),
-			right:    right.Pointer(),
-			leftLen:  refLen(left),
-			rightLen: refLen(right),
-		}, true
-	default:
+	return visitKey{
+		typ:      left.Type(),
+		left:     left.Pointer(),
+		right:    right.Pointer(),
+		leftLen:  refLen(left),
+		rightLen: refLen(right),
+	}, true
+}
+
+// oneSidedVisitKey returns the visit key for a reference whose counterpart is missing
+func oneSidedVisitKey(v reflect.Value, isLeft bool) (visitKey, bool) {
+	if !isReference(v) || v.IsNil() {
 		return visitKey{}, false
+	}
+
+	key := visitKey{typ: v.Type()}
+	if isLeft {
+		key.left, key.leftLen = v.Pointer(), refLen(v)
+	} else {
+		key.right, key.rightLen = v.Pointer(), refLen(v)
+	}
+	return key, true
+}
+
+// isReference reports if v is a pointer, map or slice
+func isReference(v reflect.Value) bool {
+	switch v.Kind() {
+	case reflect.Ptr, reflect.Map, reflect.Slice:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -174,12 +201,7 @@ func copyAppend(src []string, elems ...string) []string {
 func getTagName(tag string, f reflect.StructField) string {
 	t := f.Tag.Get(tag)
 
-	parts := strings.Split(t, ",")
-	if len(parts) < 1 {
-		return "-"
-	}
-
-	return parts[0]
+	return strings.Split(t, ",")[0]
 }
 
 // getIdentifier returns the identifier for a struct or nil if the struct has none.
@@ -203,6 +225,10 @@ func (c *Comparer) getIdentifier(v reflect.Value) (any, error) {
 		hto, toValue := hasTagOption(c.config.tagName, field, "identifier")
 		if !hto {
 			continue
+		}
+
+		if !v.Field(i).CanInterface() && !unexportedAccessOK {
+			return nil, ErrUnexportedField
 		}
 
 		single = getAsAny(v.Field(i))
@@ -340,25 +366,35 @@ func Compare(left, right any, opts ...CompareOptsFunc) (Differences, error) {
 	return c.Compare(left, right)
 }
 
-// getID returns an ID for a given value
-// basically converts value according to its type or - if configured - encode it with gob
-func getID(val any, useComplex bool) string {
-	switch v := val.(type) {
-	case string:
-		return v
-	case int:
-		return strconv.Itoa(v)
-	case indexKey:
-		return strconv.Itoa(int(v))
-	default:
-		if useComplex {
-			bWriter := new(bytes.Buffer)
-			if err := gob.NewEncoder(bWriter).Encode(v); err != nil {
-				panic(err)
-			}
-			return bWriter.String()
-		} else {
-			return fmt.Sprint(v)
-		}
+// getID returns the path element for a map key or slice identifier.
+// Strings, integers, floats and bools are rendered as text. Other values are rendered with fmt.Sprint,
+// or - if useComplex is set - encoded with gob and base64 so they survive as a path element.
+func getID(val any, useComplex bool) (string, error) {
+	if idx, ok := val.(indexKey); ok {
+		return strconv.Itoa(int(idx)), nil
 	}
+
+	rv := reflect.ValueOf(val)
+	switch rv.Kind() {
+	case reflect.String:
+		return rv.String(), nil
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return strconv.FormatInt(rv.Int(), 10), nil
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return strconv.FormatUint(rv.Uint(), 10), nil
+	case reflect.Float32, reflect.Float64:
+		return strconv.FormatFloat(rv.Float(), 'g', -1, 64), nil
+	case reflect.Bool:
+		return strconv.FormatBool(rv.Bool()), nil
+	}
+
+	if !useComplex {
+		return fmt.Sprint(val), nil
+	}
+
+	buf := new(bytes.Buffer)
+	if err := gob.NewEncoder(buf).Encode(val); err != nil {
+		return "", fmt.Errorf("cannot encode map key of type %T: %w", val, err)
+	}
+	return base64.RawStdEncoding.EncodeToString(buf.Bytes()), nil
 }

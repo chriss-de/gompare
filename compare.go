@@ -7,27 +7,27 @@ import (
 	"time"
 )
 
-// Type represents an enum with all the supported compare types
-type Type uint8
+// compareType is an enum of all supported compare types
+type compareType uint8
 
 const (
-	UNSUPPORTED Type = iota
-	TIME
-	STRUCT
-	SLICE
-	ARRAY
-	STRING
-	BOOL
-	INT
-	UINT
-	FLOAT
-	MAP
-	PTR
-	INTERFACE
+	typeUnsupported compareType = iota
+	typeTime
+	typeStruct
+	typeSlice
+	typeArray
+	typeString
+	typeBool
+	typeInt
+	typeUint
+	typeFloat
+	typeMap
+	typePtr
+	typeInterface
 )
 
-// CompareFunc represents the built-in compare functions
-type CompareFunc func([]string, reflect.Value, reflect.Value) error
+// compareFunc is the signature of the built-in compare functions
+type compareFunc func([]string, reflect.Value, reflect.Value) error
 
 // config holds config options of how to compare and present Differences
 type config struct {
@@ -38,6 +38,8 @@ type config struct {
 	structMapKeys             bool   // structMapKeys allows complex struct keys to be encoded and represented in Differences path
 	embeddedStructsAsFields   bool   // embeddedStructsAsFields if true will add EmbeddedStructs by struct name to Differences
 	allowTypeMismatch         bool   // allowTypeMismatch reports values of different kinds as CHANGED instead of returning ErrTypeMismatch
+	allowDifferentStructs     bool   // allowDifferentStructs compares structs of different types field by field instead of returning ErrTypeMismatch
+	summarizeMissing          bool   // summarizeMissing adds one entry for a missing struct/slice/map instead of one per field/element
 }
 
 // Comparer a configurable compare instance. It is safe to use one Comparer from multiple goroutines.
@@ -98,34 +100,34 @@ func (c *Comparer) clone() *Comparer {
 }
 
 // getCompareFunc returns the fitting function to compare left and right
-func (c *Comparer) getCompareFunc(left, right reflect.Value) (Type, CompareFunc) {
+func (c *Comparer) getCompareFunc(left, right reflect.Value) (compareType, compareFunc) {
 	switch {
 	case areType(left, right, reflect.TypeOf(time.Time{})):
-		return TIME, c.cmpTime
+		return typeTime, c.cmpTime
 	case areKind(left, right, reflect.Struct, reflect.Invalid):
-		return STRUCT, c.cmpStruct
+		return typeStruct, c.cmpStruct
 	case areKind(left, right, reflect.Slice, reflect.Invalid):
-		return SLICE, c.cmpSlice
+		return typeSlice, c.cmpSlice
 	case areKind(left, right, reflect.Array, reflect.Invalid):
-		return ARRAY, c.cmpSlice
+		return typeArray, c.cmpSlice
 	case areKind(left, right, reflect.String, reflect.Invalid):
-		return STRING, c.cmpString
+		return typeString, c.cmpString
 	case areKind(left, right, reflect.Bool, reflect.Invalid):
-		return BOOL, c.cmpBool
+		return typeBool, c.cmpBool
 	case areKind(left, right, reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64, reflect.Invalid):
-		return INT, c.cmpInt
+		return typeInt, c.cmpInt
 	case areKind(left, right, reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Invalid):
-		return UINT, c.cmpUint
+		return typeUint, c.cmpUint
 	case areKind(left, right, reflect.Float32, reflect.Float64, reflect.Invalid):
-		return FLOAT, c.cmpFloat
+		return typeFloat, c.cmpFloat
 	case areKind(left, right, reflect.Map, reflect.Invalid):
-		return MAP, c.cmpMap
+		return typeMap, c.cmpMap
 	case areKind(left, right, reflect.Ptr, reflect.Invalid):
-		return PTR, c.cmpPtr
+		return typePtr, c.cmpPtr
 	case areKind(left, right, reflect.Interface, reflect.Invalid):
-		return INTERFACE, c.cmpInterface
+		return typeInterface, c.cmpInterface
 	default:
-		return UNSUPPORTED, nil
+		return typeUnsupported, nil
 	}
 }
 
@@ -161,6 +163,18 @@ func (c *Comparer) compare(path []string, left, right reflect.Value) error {
 		return pathError(ErrTypeMismatch, path)
 	}
 
+	// one side is missing and the other is a container: one entry for the whole value if configured
+	if c.config.summarizeMissing && (left.Kind() == reflect.Invalid || right.Kind() == reflect.Invalid) {
+		if left.Kind() == reflect.Invalid && isComposite(right) {
+			c.differences.add(ADDED, path, nil, getAsAny(right))
+			return nil
+		}
+		if right.Kind() == reflect.Invalid && isComposite(left) {
+			c.differences.add(REMOVED, path, getAsAny(left), nil)
+			return nil
+		}
+	}
+
 	// cycle detection: if this pair of references is already being compared further up the
 	// call stack we treat it as equal, otherwise we would recurse forever
 	if key, ok := getVisitKey(left, right); ok {
@@ -173,7 +187,7 @@ func (c *Comparer) compare(path []string, left, right reflect.Value) error {
 
 	cmpType, compareFunc := c.getCompareFunc(left, right)
 
-	if cmpType == UNSUPPORTED {
+	if cmpType == typeUnsupported {
 		kind := left.Kind()
 		if kind == reflect.Invalid {
 			kind = right.Kind()
@@ -182,6 +196,45 @@ func (c *Comparer) compare(path []string, left, right reflect.Value) error {
 	}
 
 	return compareFunc(path, left, right)
+}
+
+// isComposite reports if v is a struct (other than time.Time), slice, array or map - a value that is
+// reported by its fields/elements when it is missing on one side
+func isComposite(v reflect.Value) bool {
+	switch v.Kind() {
+	case reflect.Struct:
+		return v.Type() != reflect.TypeOf(time.Time{})
+	case reflect.Slice, reflect.Array, reflect.Map:
+		return true
+	default:
+		return false
+	}
+}
+
+// cmpFromNil handles a nil pointer or interface on one side with a value on the other side.
+// The present side is passed as is (pointer or interface content) so compare can detect cycles.
+// A composite target is reported by its fields/elements (or as one entry with WithSummarizeMissing),
+// any other target is one CHANGED entry holding the dereferenced value.
+func (c *Comparer) cmpFromNil(path []string, left, right reflect.Value) error {
+	present := left
+	if present.Kind() == reflect.Invalid {
+		present = right
+	}
+
+	target := getFinalValue(present)
+	if isComposite(target) {
+		return c.compare(path, left, right)
+	}
+
+	var leftVal, rightVal any
+	if left.Kind() != reflect.Invalid {
+		leftVal = getAsAny(getFinalValue(left))
+	}
+	if right.Kind() != reflect.Invalid {
+		rightVal = getAsAny(getFinalValue(right))
+	}
+	c.differences.add(CHANGED, path, leftVal, rightVal)
+	return nil
 }
 
 // cmpDefault does basic compare operations and gets called from type specific compare functions
@@ -194,10 +247,6 @@ func (c *Comparer) cmpDefault(path []string, left, right reflect.Value) (changed
 	if right.Kind() == reflect.Invalid {
 		c.differences.add(REMOVED, path, getAsAny(left), nil)
 		return true, nil
-	}
-
-	if left.Kind() != right.Kind() {
-		return false, ErrTypeMismatch
 	}
 
 	return false, nil

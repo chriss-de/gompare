@@ -24,6 +24,15 @@ func (c *Comparer) cmpStruct(path []string, left, right reflect.Value) error {
 		}
 	}
 
+	// structs of different types are a type mismatch unless the caller allows it
+	if left.Type() != right.Type() && !c.config.allowDifferentStructs {
+		if c.config.allowTypeMismatch {
+			c.differences.add(CHANGED, path, getAsAny(left), getAsAny(right))
+			return nil
+		}
+		return pathError(ErrTypeMismatch, path)
+	}
+
 	for i := 0; i < left.NumField(); i++ {
 		field := left.Type().Field(i)
 		tName := getTagName(c.config.tagName, field)
@@ -61,12 +70,12 @@ func (c *Comparer) cmpStruct(path []string, left, right reflect.Value) error {
 }
 
 // missingCounterpart returns the value a field of a missing struct is compared against.
-// Containers (slice, array, map, pointer, interface) are compared against their zero value so their
-// elements get listed one by one as everywhere else. Every other field is compared against
-// reflect.Invalid so it is reported even if it holds its zero value.
+// Pointers and interfaces are compared against nil so a nil field produces no entry and a set one is
+// expanded. Every other field is compared against reflect.Invalid so scalars are reported even if they
+// hold their zero value, while slices, maps and structs list their elements/fields.
 func missingCounterpart(field reflect.Value) reflect.Value {
 	switch field.Kind() {
-	case reflect.Slice, reflect.Array, reflect.Map, reflect.Ptr, reflect.Interface:
+	case reflect.Ptr, reflect.Interface:
 		return reflect.Zero(field.Type())
 	default:
 		return reflect.Value{}
@@ -77,18 +86,6 @@ func missingCounterpart(field reflect.Value) reflect.Value {
 // we use this to add all fields to the Differences
 func (c *Comparer) cmpStructValuesForInvalid(dt DiffType, path []string, val reflect.Value) error {
 	var nc *Comparer = c.clone()
-
-	if dt != ADDED && dt != REMOVED {
-		return ErrInvalidChangeType
-	}
-
-	if val.Kind() == reflect.Ptr {
-		val = reflect.Indirect(val)
-	}
-
-	if val.Kind() != reflect.Struct {
-		return ErrTypeMismatch
-	}
 
 	for idx := 0; idx < val.NumField(); idx++ {
 		field := val.Type().Field(idx)
