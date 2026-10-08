@@ -51,6 +51,10 @@ type Comparer struct {
 	inProgress map[visitKey]struct{}
 	// templates caches parsed identifier templates for one comparison run, shared with clones
 	templates map[string]*template.Template
+	// elemIdentifier is the identifier template a struct field hands down to the container it holds.
+	// compareField sets it for one field, the slice or map compare of that field takes it (see
+	// takeElemIdentifier). Pointers and interfaces in between leave it untouched so it reaches the container.
+	elemIdentifier string
 }
 
 // visitKey identifies a pair of referencing values (pointer, map, slice) that is being compared
@@ -196,6 +200,23 @@ func (c *Comparer) compare(path []string, left, right reflect.Value) error {
 	}
 
 	return compareFunc(path, left, right)
+}
+
+// compareField compares the values of one struct field. If the field is a slice, array or map with an
+// identifier template, that template identifies the elements of the field (one level down only).
+func (c *Comparer) compareField(path []string, left, right reflect.Value, elemIdentifier string) error {
+	c.elemIdentifier = elemIdentifier
+	defer func() { c.elemIdentifier = "" }()
+
+	return c.compare(path, left, right)
+}
+
+// takeElemIdentifier returns the identifier template handed down by the struct field being compared, if
+// any, and clears it so it does not reach deeper levels
+func (c *Comparer) takeElemIdentifier() string {
+	tmpl := c.elemIdentifier
+	c.elemIdentifier = ""
+	return tmpl
 }
 
 // isComposite reports if v is a struct (other than time.Time), slice, array or map - a value that is

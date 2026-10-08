@@ -521,6 +521,19 @@ func TestIdentifierTemplateErrors(t *testing.T) {
 	assertDiffs(t, diffs, Differences{{Type: CHANGED, Path: []string{"x-1", "v"}, Left: 0, Right: 5}})
 }
 
+// Bug: a template on a single identifier field was ignored and the raw value was used
+func TestSingleIdentifierFieldTemplate(t *testing.T) {
+	type single struct {
+		ID int `cmp:"id,identifier:id-{{.id}}"`
+		V  int `cmp:"v"`
+	}
+	diffs, err := Compare([]single{{1, 0}}, []single{{1, 5}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertDiffs(t, diffs, Differences{{Type: CHANGED, Path: []string{"id-1", "v"}, Left: 0, Right: 5}})
+}
+
 // Bug: a ':' inside an identifier template cut the template off and it was silently ignored
 func TestIdentifierTemplateWithColon(t *testing.T) {
 	type colon struct {

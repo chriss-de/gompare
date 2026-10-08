@@ -32,6 +32,11 @@ The module path is now `github.com/chriss-de/gompare/v2`.
 - Errors raised while probing elements of an unordered slice propagate. A type mismatch between elements still means "not equal".
 
 ### Added
+- An `identifier:<template>` option on a slice, array or map field identifies the elements of that field
+  and overrides the identifier tags of the element type. The template sees every field of the element.
+  A bare `identifier` on such a field returns `ErrIdentifierTemplate`.
+- The `array_identifier` tag option uses an array field as a whole as (part of) the identifier of its struct.
+  A bare `identifier` on an array field did that before and is now an error, see above.
 - `WithSummarizeMissing()` reports a missing struct, slice, array or map as one entry.
 - `WithAllowDifferentStructs()` compares structs of different types field by field.
 - `WithAllowTypeMismatch()` reports values of different kind as `changed` instead of returning `ErrTypeMismatch`.
@@ -43,6 +48,8 @@ The module path is now `github.com/chriss-de/gompare/v2`.
 - Benchmarks and a CI workflow (gofmt, vet, race tests, staticcheck).
 
 ### Fixed
+- A template on a single identifier field is used. Before it was ignored and the raw value was used.
+- An identifier field holding a value that cannot be a map key returns `ErrIdentifierTemplate` instead of panicking.
 - One `Comparer` can be used from multiple goroutines. Each call has its own state.
 - Cycles through pointers, maps and slices terminate instead of recursing forever.
 - A missing map no longer rewrites differences of sibling keys that share a path prefix.

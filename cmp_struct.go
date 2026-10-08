@@ -61,12 +61,26 @@ func (c *Comparer) cmpStruct(path []string, left, right reflect.Value) error {
 			return pathError(ErrUnexportedField, fieldPath)
 		}
 
-		if err := c.compare(fieldPath, leftField, rightFieldName); err != nil {
+		elemIdentifier, err := fieldElemIdentifier(c.config.tagName, field)
+		if err != nil {
+			return pathError(err, fieldPath)
+		}
+
+		if err := c.compareField(fieldPath, leftField, rightFieldName, elemIdentifier); err != nil {
 			return err
 		}
 	}
 
 	return nil
+}
+
+// fieldElemIdentifier returns the identifier template a struct field hands down to its elements, if any
+func fieldElemIdentifier(tagName string, field reflect.StructField) (string, error) {
+	opt, err := fieldIdentifier(tagName, field)
+	if err != nil {
+		return "", err
+	}
+	return opt.elemTemplate, nil
 }
 
 // missingCounterpart returns the value a field of a missing struct is compared against.
@@ -115,8 +129,13 @@ func (c *Comparer) cmpStructValuesForInvalid(dt DiffType, path []string, val ref
 			return pathError(ErrUnexportedField, fieldPath)
 		}
 
+		elemIdentifier, err := fieldElemIdentifier(c.config.tagName, field)
+		if err != nil {
+			return pathError(err, fieldPath)
+		}
+
 		// Differences are always produced as "missing on the left" and patched to dt below
-		if err := nc.compare(fieldPath, missing, valField); err != nil {
+		if err := nc.compareField(fieldPath, missing, valField, elemIdentifier); err != nil {
 			return err
 		}
 	}

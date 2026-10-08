@@ -126,6 +126,8 @@ Struct fields are configured with the `cmp` tag. The first value is the name use
 | `cmp:"name"`        | use `name` in the path instead of the field name                           |
 | `cmp:"-"`           | exclude the field from the comparison                                      |
 | `cmp:",identifier"` | use the field to match elements of a slice or array (see below)            |
+| `cmp:",identifier:<template>"` | on a slice, array or map field: match its elements by this template (see below) |
+| `cmp:",array_identifier"` | use an array field (as a whole) to match elements of a slice or array (see below) |
 
 `WithTagName("json")` lets you reuse another tag. Note that linters such as staticcheck (check SA5008)
 flag `identifier` as an unknown option on well known tags like `json` or `xml`. Keep the default `cmp`
@@ -169,6 +171,46 @@ Rules:
 - An identifier must be unique within one slice, otherwise `Compare` returns `ErrDuplicateIdentifier`.
 - Elements without an identifier (for example a `nil` pointer in a `[]*Seat`) are matched by their index.
 - The first struct element found on either side decides whether a slice is compared by identifier.
+
+#### Identifying the elements of a field
+
+An `identifier:<template>` option on a **slice, array or map field** does not make that field part of
+its struct's identifier. Instead the template identifies the elements of that field and overrides any
+identifier tags of the element type. This is useful if the element type carries no identifier, or if it
+comes from a package you cannot tag:
+
+```go
+type Right struct {
+	Name  string `cmp:"name"`
+	Scope string `cmp:"scope"`
+}
+
+type User struct {
+	Rights []Right `cmp:"rights,identifier:{{ .name }}@{{ .scope }}"`
+}
+// path of a changed scope: ["rights", "read@all", "scope"]
+```
+
+The template data holds every field of the element under its Go field name and its tag name, not only
+the identifier fields. The override applies one level down only: slices inside a `Right` keep their own
+identifiers. Elements that are `nil` fall back to their index, elements that are not structs result in
+`ErrIdentifierTemplate`. On a map field the entries are matched and listed by the rendered identifier
+instead of the map key. A bare `identifier` without a template on a slice, array or map field is an error
+(`ErrIdentifierTemplate`) as there is nothing to pick.
+
+To use an array field as a whole as (part of) the identifier of its struct, tag it with `array_identifier`
+instead. It takes a template like `identifier` does and can be combined with an `identifier:<template>`
+on the same field, which then still applies to the elements:
+
+```go
+type Cell struct {
+	Pos   [2]int `cmp:"pos,array_identifier"`
+	Value string `cmp:"value"`
+}
+// path of a changed value: ["[3 4]", "value"]
+```
+
+`array_identifier` on a field that is not an array returns `ErrInvalidOption`.
 
 ## Options
 

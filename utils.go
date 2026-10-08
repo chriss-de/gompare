@@ -204,6 +204,75 @@ func getTagName(tag string, f reflect.StructField) string {
 	return strings.Split(t, ",")[0]
 }
 
+// identifierOption is the meaning of the identifier options of a struct field
+type identifierOption struct {
+	// isIdentifier is set if the field is (part of) the identifier of its struct
+	isIdentifier bool
+	// template is the template given for the struct's identifier, empty if none
+	template string
+	// elemTemplate is the template that identifies the elements of a slice, array or map field, empty if none
+	elemTemplate string
+}
+
+// fieldIdentifier reads the identifier options of a struct field. On a slice, array or map field (also
+// behind pointers) the identifier option must carry a template, which then identifies the elements of that
+// field. On every other field it marks the field as (part of) the identifier of its struct.
+// The array_identifier option marks an array field as (part of) the identifier of its struct. Both options
+// may be given on one array field.
+func fieldIdentifier(tagName string, f reflect.StructField) (identifierOption, error) {
+	var opt identifierOption
+
+	if hto, tmpl := hasTagOption(tagName, f, "array_identifier"); hto {
+		if derefType(f.Type).Kind() != reflect.Array {
+			return opt, fmt.Errorf("%w: array_identifier on field %s of kind %s, only arrays are allowed",
+				ErrInvalidOption, f.Name, derefType(f.Type).Kind())
+		}
+		opt.isIdentifier = true
+		opt.template = tmpl
+	}
+
+	hto, tmpl := hasTagOption(tagName, f, "identifier")
+	if !hto {
+		return opt, nil
+	}
+
+	if !isContainerType(f.Type) {
+		opt.isIdentifier = true
+		opt.template = tmpl
+		return opt, nil
+	}
+
+	if tmpl == "" {
+		if derefType(f.Type).Kind() == reflect.Array {
+			return opt, fmt.Errorf("%w: identifier on array field %s needs a template that identifies its elements, use array_identifier to identify the struct by the array",
+				ErrIdentifierTemplate, f.Name)
+		}
+		return opt, fmt.Errorf("%w: identifier on field %s needs a template that identifies its elements",
+			ErrIdentifierTemplate, f.Name)
+	}
+
+	opt.elemTemplate = tmpl
+	return opt, nil
+}
+
+// derefType returns t behind any pointers
+func derefType(t reflect.Type) reflect.Type {
+	for t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	return t
+}
+
+// isContainerType reports if t (behind any pointers) is a slice, array or map
+func isContainerType(t reflect.Type) bool {
+	switch derefType(t).Kind() {
+	case reflect.Slice, reflect.Array, reflect.Map:
+		return true
+	default:
+		return false
+	}
+}
+
 // getIdentifier returns the identifier for a struct or nil if the struct has none.
 // A single identifier field is returned as its value. Several identifier fields are rendered
 // through a template: either the one given in the tag or all field names joined by the configured separator.
@@ -222,8 +291,11 @@ func (c *Comparer) getIdentifier(v reflect.Value) (any, error) {
 
 	for i := 0; i < v.NumField(); i++ {
 		field := v.Type().Field(i)
-		hto, toValue := hasTagOption(c.config.tagName, field, "identifier")
-		if !hto {
+		opt, err := fieldIdentifier(c.config.tagName, field)
+		if err != nil {
+			return nil, err
+		}
+		if !opt.isIdentifier {
 			continue
 		}
 
@@ -238,20 +310,26 @@ func (c *Comparer) getIdentifier(v reflect.Value) (any, error) {
 			data[tName] = single
 		}
 
-		if toValue != "" {
+		if opt.template != "" {
 			if templateText == "" {
-				templateText = toValue
-			} else if templateText != toValue {
+				templateText = opt.template
+			} else if templateText != opt.template {
 				return nil, fmt.Errorf("%w: identifier fields of %s use different templates %q and %q",
-					ErrIdentifierTemplate, v.Type(), templateText, toValue)
+					ErrIdentifierTemplate, v.Type(), templateText, opt.template)
 			}
 		}
 	}
 
-	switch len(fieldNames) {
-	case 0:
+	if len(fieldNames) == 0 {
 		return nil, nil
-	case 1:
+	}
+
+	// a single identifier field is used as is, unless a template is given or its value cannot be a map key
+	if len(fieldNames) == 1 && templateText == "" {
+		if single != nil && !reflect.TypeOf(single).Comparable() {
+			return nil, fmt.Errorf("%w: identifier field %s of %s holds a value of type %T that cannot be compared, use a template",
+				ErrIdentifierTemplate, fieldNames[0], v.Type(), single)
+		}
 		return single, nil
 	}
 
@@ -263,14 +341,50 @@ func (c *Comparer) getIdentifier(v reflect.Value) (any, error) {
 		templateText = strings.Join(fieldNames, string(c.config.combinedIdentifierJoinSep))
 	}
 
+	return c.renderIdentifier(templateText, data, v.Type())
+}
+
+// getElemIdentifier returns the identifier of a container element rendered through the template of the
+// container field. The template data holds every field of the element by its Go field name and by its tag
+// name. A nil element (e.g. a nil pointer) has no identifier and nil is returned. Any other element must
+// be a struct behind any pointers and interfaces.
+func (c *Comparer) getElemIdentifier(templateText string, elem reflect.Value) (any, error) {
+	v := getFinalValue(elem)
+	if v.Kind() == reflect.Invalid {
+		return nil, nil
+	}
+	if v.Kind() != reflect.Struct {
+		return nil, fmt.Errorf("%w: %q cannot identify an element of kind %s", ErrIdentifierTemplate, templateText, v.Kind())
+	}
+
+	data := make(map[string]any, v.NumField())
+	for i := 0; i < v.NumField(); i++ {
+		field := v.Type().Field(i)
+
+		if !v.Field(i).CanInterface() && !unexportedAccessOK {
+			return nil, ErrUnexportedField
+		}
+
+		val := getAsAny(v.Field(i))
+		data[field.Name] = val
+		if tName := getTagName(c.config.tagName, field); tName != "" && tName != "-" {
+			data[tName] = val
+		}
+	}
+
+	return c.renderIdentifier(templateText, data, v.Type())
+}
+
+// renderIdentifier executes an identifier template with data. Errors name the template and the struct type.
+func (c *Comparer) renderIdentifier(templateText string, data map[string]any, typ reflect.Type) (any, error) {
 	tmpl, err := c.identifierTemplate(templateText)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %q of %s: %v", ErrIdentifierTemplate, templateText, v.Type(), err)
+		return nil, fmt.Errorf("%w: %q of %s: %v", ErrIdentifierTemplate, templateText, typ, err)
 	}
 
 	out := bytes.NewBuffer(nil)
 	if err := tmpl.Execute(out, data); err != nil {
-		return nil, fmt.Errorf("%w: %q of %s: %v", ErrIdentifierTemplate, templateText, v.Type(), err)
+		return nil, fmt.Errorf("%w: %q of %s: %v", ErrIdentifierTemplate, templateText, typ, err)
 	}
 
 	return out.String(), nil
